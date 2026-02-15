@@ -1,0 +1,13 @@
+{
+  "name": "@cinelink/gen-client",
+  "version": "1.0.1771109445527",
+	"dependencies": {
+		"@cinelink/gen-shared": "file:../shared"
+	},
+  "main": "./dist/mjs/index.js",
+  "typings": "./dist/mjs/index.d.ts",
+	"type": "module",
+	"scripts": { 
+		"build": "tsc"
+	}
+}

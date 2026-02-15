@@ -1,0 +1,6 @@
+{
+  "name": "@cinelink/networking",
+  "scripts": {
+    "build": "rootsdk build proto"
+  }
+}

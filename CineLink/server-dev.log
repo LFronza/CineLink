@@ -1,0 +1,41 @@
+
+> @cinelink/server@1.0.0 server
+> rootsdk start devhost --project-folder=../
+
+rootsdk-devhost
+(node:17312) [DEP0190] DeprecationWarning: Passing args to a child process with shell option true can lead to security vulnerabilities, as the arguments are not escaped, only concatenated.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+Starting ..\server\dist\main.js
+ClientMessage WebSocketServer (localhost:8080)
+ClientUpdate WebSocketServer (localhost:8082)
+DevAppHostService (localhost:8090)
+OutOfBandServices (localhost:8081)
+Starting ..\server\dist\main.js
+> Debugger listening on ws://127.0.0.1:9229/bdb198d9-1709-4cb9-8436-5813f669f4d7
+For help, see: https://nodejs.org/en/docs/inspector
+> Starting Hub
+> PacketHub ready
+> MessageHub ready
+DevAppHostService: server connected
+Community: Attached ACz8kLIajQKphKvh9lsNuw
+Client connected xKytTAkGSreQkn7LkjgLbg
+Client connected gddNST-3TjCoT3uWIJ0CgQ
+> [CineLink][2026-02-14T19:45:45.554Z] broadcast:skipped {
+  action: 'host:set',
+  roomId: 'cinelink-fumste',
+  actorUserId: 'ACzppHXWhQGHP7kBZb7zVw',
+  communityId: 'ACz8kLIajQKphKvh9lsNuw'
+}
+> [CineLink][2026-02-14T19:45:45.558Z] broadcast:skipped {
+  action: 'room:rename',
+  roomId: 'cinelink-fumste',
+  actorUserId: 'ACzppHXWhQGHP7kBZb7zVw',
+  communityId: 'ACz8kLIajQKphKvh9lsNuw'
+}
+npm error Lifecycle script `server` failed with error:
+npm error code 4294967295
+npm error path g:\Bibliotecas\Documentos\Projects\Cursor\RootPlayer\CineLink\server
+npm error workspace @cinelink/server@1.0.0
+npm error location g:\Bibliotecas\Documentos\Projects\Cursor\RootPlayer\CineLink\server
+npm error command failed
+npm error command C:\WINDOWS\system32\cmd.exe /d /s /c rootsdk start devhost --project-folder=../
