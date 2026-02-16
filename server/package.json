@@ -1,0 +1,15 @@
+{
+  "name": "@cinelink/server",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "tsc",
+    "server": "npm run build && rootsdk start devhost --project-folder=../"
+  },
+  "dependencies": {
+    "adm-zip": "^0.5.16"
+  },
+  "devDependencies": {
+    "@types/adm-zip": "^0.5.7"
+  }
+}
