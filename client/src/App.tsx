@@ -2650,8 +2650,9 @@ const App: React.FC = () => {
                 src={drivePreviewUrl}
                 style={styles.videoFrame}
                 title="Google Drive player"
-                allow="autoplay; fullscreen; picture-in-picture"
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen"
                 allowFullScreen
+                scrolling="no"
                 referrerPolicy="strict-origin-when-cross-origin"
               />
             </div>
@@ -2861,8 +2862,8 @@ const App: React.FC = () => {
                               return (
                                 <div key={`track-${track.index}`} style={styles.subtitleEmbeddedRow}>
                                   <div style={styles.subtitleEmbeddedMeta}>
-                                    <strong>{track.label}</strong>
-                                    <span>{[track.language || "und", track.kind || "subtitles"].join(" • ")}</span>
+                                    <strong style={styles.textEllipsisSingle}>{track.label}</strong>
+                                    <span style={styles.textEllipsisSingle}>{[track.language || "und", track.kind || "subtitles"].join(" • ")}</span>
                                   </div>
                                   <button
                                     style={styles.subtitleAddButton}
@@ -2895,7 +2896,7 @@ const App: React.FC = () => {
                       {subtitleLanguageGroups.map((group) => (
                         <div key={group.language} style={styles.subtitleLangRow}>
                           <div style={styles.subtitleLangMeta}>
-                            <strong>{group.language}</strong>
+                            <strong style={styles.textEllipsisSingle}>{group.language}</strong>
                             <span>{group.items.length} found</span>
                           </div>
                           {(() => {
@@ -2951,8 +2952,8 @@ const App: React.FC = () => {
                           return (
                             <div key={`audio-${track.index}`} style={styles.subtitleEmbeddedRow}>
                               <div style={styles.subtitleEmbeddedMeta}>
-                                <strong>{track.label}</strong>
-                                <span>{[track.language || "und", track.kind || "audio"].join(" • ")}</span>
+                                <strong style={styles.textEllipsisSingle}>{track.label}</strong>
+                                <span style={styles.textEllipsisSingle}>{[track.language || "und", track.kind || "audio"].join(" • ")}</span>
                               </div>
                               <button
                                 style={styles.subtitleAddButton}
@@ -3480,7 +3481,15 @@ function getGoogleDrivePreviewUrl(url: string | undefined): string | undefined {
   if (!fileId) {
     return undefined;
   }
-  return `https://drive.google.com/file/d/${fileId}/preview`;
+  try {
+    const payload = JSON.stringify({ id: [fileId] });
+    const encoded = (typeof window !== "undefined" && typeof window.btoa === "function")
+      ? window.btoa(payload)
+      : btoa(payload);
+    return `https://sh20raj.github.io/DrivePlyr/plyr.html?id=${encodeURIComponent(encoded)}`;
+  } catch {
+    return `https://drive.google.com/file/d/${fileId}/preview`;
+  }
 }
 
 function toGoogleDriveDirectViewUrl(url: string): string {
@@ -5055,11 +5064,12 @@ const styles: Record<string, React.CSSProperties> = {
     display: "grid",
     gap: "6px",
     maxHeight: "128px",
-    overflowY: "auto"
+    overflowY: "auto",
+    overflowX: "hidden"
   },
   subtitleInputRow: {
     display: "grid",
-    gridTemplateColumns: "1fr auto auto",
+    gridTemplateColumns: "minmax(0, 1fr) auto auto",
     gap: "8px",
     alignItems: "center"
   },
@@ -5125,7 +5135,8 @@ const styles: Record<string, React.CSSProperties> = {
     display: "grid",
     gap: "6px",
     maxHeight: "138px",
-    overflowY: "auto"
+    overflowY: "auto",
+    overflowX: "hidden"
   },
   subtitleEmbeddedRow: {
     display: "flex",
@@ -5135,18 +5146,27 @@ const styles: Record<string, React.CSSProperties> = {
     border: "1px solid rgba(255,255,255,0.16)",
     borderRadius: "8px",
     background: "rgba(255,255,255,0.04)",
-    padding: "6px 8px"
+    padding: "6px 8px",
+    minWidth: 0
   },
   subtitleEmbeddedMeta: {
     minWidth: 0,
     display: "grid",
     gap: "2px",
-    fontSize: "0.8rem"
+    fontSize: "0.8rem",
+    overflow: "hidden"
   },
   subtitleEmbeddedEmpty: {
     margin: 0,
     fontSize: "0.8rem",
     opacity: 0.78
+  },
+  textEllipsisSingle: {
+    display: "block",
+    minWidth: 0,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap"
   },
   subtitleLangRow: {
     display: "flex",
@@ -5156,13 +5176,15 @@ const styles: Record<string, React.CSSProperties> = {
     border: "1px solid rgba(255,255,255,0.16)",
     borderRadius: "8px",
     background: "rgba(255,255,255,0.05)",
-    padding: "6px 8px"
+    padding: "6px 8px",
+    minWidth: 0
   },
   subtitleLangMeta: {
     minWidth: 0,
     display: "grid",
     gap: "2px",
-    fontSize: "0.82rem"
+    fontSize: "0.82rem",
+    overflow: "hidden"
   },
   subtitleAddButton: {
     width: "34px",

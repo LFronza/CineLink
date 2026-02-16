@@ -1018,7 +1018,8 @@ async function resolvePlayableMediaInputBundle(value: string | undefined): Promi
   }
   const folderId = extractDriveFolderId(primary);
   if (!folderId) {
-    return { urls: [await enrichMediaUrlLabel(primary)] };
+    const archiveResolved = await resolveArchivePreferredPlayableUrl(primary);
+    return { urls: [await enrichMediaUrlLabel(archiveResolved)] };
   }
   const resourceKey = extractDriveResourceKey(primary);
   const parsedFolder = await listGoogleDriveFolderVideoUrls(folderId, resourceKey);
@@ -1029,6 +1030,109 @@ async function resolvePlayableMediaInputBundle(value: string | undefined): Promi
     urls: await Promise.all(parsedFolder.urls.map((url) => enrichMediaUrlLabel(url))),
     sourceName: parsedFolder.folderName
   };
+}
+
+async function resolveArchivePreferredPlayableUrl(urlValue: string): Promise<string> {
+  const raw = (urlValue || "").trim();
+  if (!raw) {
+    return urlValue;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return urlValue;
+  }
+  const host = parsed.hostname.toLowerCase();
+  const isArchiveHost = host === "archive.org" || host.endsWith(".archive.org");
+  if (!isArchiveHost) {
+    return urlValue;
+  }
+
+  const parts = parsed.pathname.split("/").filter(Boolean);
+  const isDownload = parts[0] === "download";
+  if (!isDownload) {
+    return urlValue;
+  }
+  const identifier = parts[1] || "";
+  if (!identifier) {
+    return urlValue;
+  }
+  const directFilePath = parts.length > 2 ? parts.slice(2).join("/") : "";
+  const directFileLower = directFilePath.toLowerCase();
+  const directFileIsMkv = /\.mkv$/i.test(directFilePath);
+
+  try {
+    const metadataResp = await fetch(`https://archive.org/metadata/${encodeURIComponent(identifier)}`, {
+      headers: { "User-Agent": "CineLink/1.0 archive-mkv-fallback" }
+    });
+    if (!metadataResp.ok) {
+      return urlValue;
+    }
+    const metadata = await metadataResp.json() as { files?: Array<{ name?: string; format?: string }> };
+    const files = Array.isArray(metadata.files) ? metadata.files : [];
+    const videoFiles = files.filter((file) => {
+      const name = (file.name || "").trim().toLowerCase();
+      if (!name || name.endsWith("/")) {
+        return false;
+      }
+      if (/\.(mp4|m4v|webm|mov|mkv)$/i.test(name)) {
+        return true;
+      }
+      const format = (file.format || "").toLowerCase();
+      return format.includes("mpeg4") || format.includes("h.264") || format.includes("matroska") || format.includes("webm");
+    });
+    if (!videoFiles.length) {
+      return urlValue;
+    }
+
+    const scoreFile = (file: { name?: string; format?: string }): number => {
+      const name = (file.name || "").toLowerCase();
+      const format = (file.format || "").toLowerCase();
+      let score = 0;
+      if (/\.mp4$/i.test(name)) {
+        score += 130;
+      } else if (/\.m4v$/i.test(name)) {
+        score += 120;
+      } else if (/\.webm$/i.test(name)) {
+        score += 110;
+      } else if (/\.mov$/i.test(name)) {
+        score += 90;
+      } else if (/\.mkv$/i.test(name)) {
+        score += 20;
+      }
+      if (format.includes("h.264") || format.includes("mpeg4")) {
+        score += 40;
+      } else if (format.includes("webm")) {
+        score += 25;
+      } else if (format.includes("matroska")) {
+        score += 5;
+      }
+      if (directFilePath && name.endsWith(directFileLower)) {
+        score += directFileIsMkv ? 0 : 80;
+      }
+      return score;
+    };
+
+    const sorted = [...videoFiles].sort((a, b) => scoreFile(b) - scoreFile(a));
+    const best = sorted[0];
+    if (!best?.name) {
+      return urlValue;
+    }
+    const picked = best.name
+      .split("/")
+      .filter(Boolean)
+      .map((segment) => encodeURIComponent(segment))
+      .join("/");
+    const resolved = `https://archive.org/download/${encodeURIComponent(identifier)}/${picked}`;
+    if (resolved !== raw) {
+      serverLog("media:archive:fallback-picked", { identifier, from: raw, to: resolved });
+    }
+    return resolved;
+  } catch (error) {
+    serverLog("media:archive:fallback-error", { identifier, error: String(error) });
+    return urlValue;
+  }
 }
 
 function extractYouTubePlaylistId(urlValue: string): string | undefined {
