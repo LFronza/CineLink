@@ -1,0 +1,33 @@
+import { AdvanceQueueRequest, DecideHostClaimRequest, FetchSubtitleRequest, FetchSubtitleResponse, GetRoomStateRequest, GetRoomStateResponse, HostLaunchSyncRequest, HostStartSyncRequest, LeaveRoomRequest, ListRoomsRequest, ListRoomsResponse, MoveQueueItemRequest, MutationResponse, PlaybackRequest, PlaylistMutationRequest, RemoveQueueItemRequest, ReportSyncStatusRequest, RequestHostClaimRequest, SearchSubtitlesRequest, SearchSubtitlesResponse, SetDurationRequest, SetHostRequest, SetMediaRequest, SetRateRequest, SetRoomNameRequest, SetSubtitleRequest, SetViewerQueuePolicyRequest, StateChangedEvent } from "@cinelink/gen-shared";
+import { BroadcastClientMerged, Client, DeviceContext, RootServerService } from "@rootsdk/server-app";
+export declare abstract class CineLinkServiceBase implements RootServerService {
+    abstract listRooms(request: ListRoomsRequest, client: Client): Promise<ListRoomsResponse>;
+    abstract getRoomState(request: GetRoomStateRequest, client: Client): Promise<GetRoomStateResponse>;
+    abstract leaveRoom(request: LeaveRoomRequest, client: Client): Promise<MutationResponse>;
+    abstract setHost(request: SetHostRequest, client: Client): Promise<MutationResponse>;
+    abstract setRoomName(request: SetRoomNameRequest, client: Client): Promise<MutationResponse>;
+    abstract setViewerQueuePolicy(request: SetViewerQueuePolicyRequest, client: Client): Promise<MutationResponse>;
+    abstract requestHostClaim(request: RequestHostClaimRequest, client: Client): Promise<MutationResponse>;
+    abstract decideHostClaim(request: DecideHostClaimRequest, client: Client): Promise<MutationResponse>;
+    abstract setMedia(request: SetMediaRequest, client: Client): Promise<MutationResponse>;
+    abstract addQueueNext(request: PlaylistMutationRequest, client: Client): Promise<MutationResponse>;
+    abstract addQueueLast(request: PlaylistMutationRequest, client: Client): Promise<MutationResponse>;
+    abstract advanceQueue(request: AdvanceQueueRequest, client: Client): Promise<MutationResponse>;
+    abstract previousQueue(request: AdvanceQueueRequest, client: Client): Promise<MutationResponse>;
+    abstract removeQueueItem(request: RemoveQueueItemRequest, client: Client): Promise<MutationResponse>;
+    abstract moveQueueItem(request: MoveQueueItemRequest, client: Client): Promise<MutationResponse>;
+    abstract setDuration(request: SetDurationRequest, client: Client): Promise<MutationResponse>;
+    abstract play(request: PlaybackRequest, client: Client): Promise<MutationResponse>;
+    abstract pause(request: PlaybackRequest, client: Client): Promise<MutationResponse>;
+    abstract seek(request: PlaybackRequest, client: Client): Promise<MutationResponse>;
+    abstract setRate(request: SetRateRequest, client: Client): Promise<MutationResponse>;
+    abstract searchSubtitles(request: SearchSubtitlesRequest, client: Client): Promise<SearchSubtitlesResponse>;
+    abstract fetchSubtitle(request: FetchSubtitleRequest, client: Client): Promise<FetchSubtitleResponse>;
+    abstract setSubtitle(request: SetSubtitleRequest, client: Client): Promise<MutationResponse>;
+    abstract reportSyncStatus(request: ReportSyncStatusRequest, client: Client): Promise<MutationResponse>;
+    abstract hostStartSync(request: HostStartSyncRequest, client: Client): Promise<MutationResponse>;
+    abstract hostLaunchSync(request: HostLaunchSyncRequest, client: Client): Promise<MutationResponse>;
+    broadcastStateChanged(message: StateChangedEvent, clients: BroadcastClientMerged, except?: DeviceContext): void;
+    private __register;
+    get ServerServiceName(): string;
+}
