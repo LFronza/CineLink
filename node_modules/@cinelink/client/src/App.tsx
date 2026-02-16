@@ -307,6 +307,24 @@ const App: React.FC = () => {
     margin: isMobile ? "8px 8px 0" : styles.playlistDock.margin,
     padding: isMobile ? "8px" : styles.playlistDock.padding
   };
+  const responsiveQueueRowStyle: React.CSSProperties = {
+    ...styles.queueRow,
+    gap: isMobile ? "6px" : styles.queueRow.gap,
+    padding: isMobile ? "5px 6px" : styles.queueRow.padding
+  };
+  const responsiveQueueThumbStyle: React.CSSProperties = {
+    ...styles.queueThumb,
+    width: isMobile ? "64px" : styles.queueThumb.width,
+    height: isMobile ? "36px" : styles.queueThumb.height
+  };
+  const responsiveQueueItemStyle: React.CSSProperties = {
+    ...styles.queueItem,
+    fontSize: isMobile ? "0.9rem" : styles.queueItem.fontSize
+  };
+  const responsiveQueueBylineStyle: React.CSSProperties = {
+    ...styles.queueByline,
+    fontSize: isMobile ? "0.78rem" : styles.queueByline.fontSize
+  };
   const plyrThemeVars: React.CSSProperties = isLightTheme
     ? {
       ["--plyr-color-main" as any]: "#4f7ee8",
@@ -2242,10 +2260,10 @@ const App: React.FC = () => {
 
   if (view === "lobby") {
     return (
-      <main style={{ ...styles.page, background: tokens.background, color: tokens.text }}>
+      <main style={{ ...responsivePageStyle, background: tokens.background, color: tokens.text }}>
         <section
           style={{
-            ...styles.lobbyShell,
+            ...responsiveLobbyShellStyle,
             borderColor: tokens.border,
             background: tokens.glass,
             ...liquidShellSurfaceStyle
@@ -2275,9 +2293,9 @@ const App: React.FC = () => {
             </div>
           </header>
           <span style={styles.srOnly}>{status}</span>
-          <h2 style={styles.lobbyTitle}>Lobby</h2>
+          <h2 style={responsiveLobbyTitleStyle}>Lobby</h2>
 
-          <section style={styles.roomGrid}>
+          <section style={responsiveRoomGridStyle}>
             {rooms.map((room) => {
               const minutes = Math.floor(room.currentTimeSeconds / 60);
               const durationMinutes = Math.floor(room.durationSeconds / 60);
@@ -2293,7 +2311,7 @@ const App: React.FC = () => {
                 <article
                   key={room.roomId}
                   style={{
-                    ...styles.roomCard,
+                    ...responsiveRoomCardStyle,
                     borderColor: tokens.border,
                     background: tokens.card,
                     ...liquidCardSurfaceStyle,
@@ -2366,7 +2384,7 @@ const App: React.FC = () => {
             })}
             <article
               style={{
-                ...styles.roomCard,
+                ...responsiveRoomCardStyle,
                 borderColor: tokens.border,
                 background: tokens.card,
                 cursor: "pointer",
@@ -2383,7 +2401,7 @@ const App: React.FC = () => {
             <div style={themedModalOverlayStyle} onClick={() => setRoomModalOpen(false)}>
               <section
                 style={{
-                  ...styles.roomModal,
+                  ...responsiveRoomModalStyle,
                   borderColor: tokens.border,
                   background: tokens.flyout,
                   color: tokens.text,
@@ -2475,7 +2493,7 @@ const App: React.FC = () => {
   }
 
   return (
-    <main style={{ ...styles.page, background: tokens.background, color: tokens.text }}>
+    <main style={{ ...responsivePageStyle, background: tokens.background, color: tokens.text }}>
       <style>{`
         .subtitle-scroll {
           scrollbar-width: thin;
@@ -2550,16 +2568,16 @@ const App: React.FC = () => {
         }
       `}</style>
       <section
-        style={{ ...styles.playerShell, borderColor: tokens.border, background: tokens.glass, ...liquidShellSurfaceStyle }}
+        style={{ ...responsivePlayerShellStyle, borderColor: tokens.border, background: tokens.glass, ...liquidShellSurfaceStyle }}
         onMouseDown={closeHostPopupOnOutsideClick}
       >
-        <div style={themedPlayerHeaderStyle}>
+        <div style={responsivePlayerHeaderStyle}>
           <button style={themedIconButtonStyle} onClick={() => void leaveCurrentRoom()} title="Back" aria-label="Back">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
               <path d="M15 6L9 12L15 18" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
           </button>
-          <strong style={styles.playerTitle} title={getReadableRoomName(roomState.roomName || roomId, roomId || "CineLink Room")}>
+          <strong style={responsivePlayerTitleStyle} title={getReadableRoomName(roomState.roomName || roomId, roomId || "CineLink Room")}>
             {getReadableRoomName(roomState.roomName || roomId, roomId || "CineLink Room")}
           </strong>
           <div style={styles.playerHeaderActions} />
@@ -2623,11 +2641,11 @@ const App: React.FC = () => {
             )
           )}
           {youtubeVideoId ? (
-            <div style={styles.videoFrameWrap}>
+            <div style={responsiveVideoFrameWrapStyle}>
               <div ref={ytContainerRef} style={styles.videoFrame} />
             </div>
           ) : isDriveIframeMode && drivePreviewUrl ? (
-            <div style={styles.videoFrameWrap}>
+            <div style={responsiveVideoFrameWrapStyle}>
               <iframe
                 src={drivePreviewUrl}
                 style={styles.videoFrame}
@@ -2640,7 +2658,7 @@ const App: React.FC = () => {
           ) : (
             <video
               ref={videoRef}
-              style={styles.video}
+              style={responsiveVideoStyle}
               controls
               onPlay={emitPlay}
               onPause={emitPause}
@@ -2672,7 +2690,7 @@ const App: React.FC = () => {
           )}
 
           {hostPopup && ((hostPopup === "room" && isHost) || (hostPopup === "media" && (isHost || roomState.allowViewerQueueAdd)) || (hostPopup === "subtitle" && canOpenSubtitlePopup) || (hostPopup === "audio" && canOpenAudioPopup)) && (
-            <aside ref={hostPopupRef} style={hostPopupStyle(tokens, true, hostPopup, isLightTheme)}>
+            <aside ref={hostPopupRef} style={hostPopupStyle(tokens, true, hostPopup, isLightTheme, isMobile)}>
               {hostPopup === "room" && (
                 <div style={styles.flyoutBody}>
                   <h3 style={styles.flyoutTitle}>Room</h3>
@@ -2959,8 +2977,8 @@ const App: React.FC = () => {
           )}
         </div>
 
-        <div ref={bottomActionsRef} style={styles.playerBottomActions}>
-          <div style={styles.nowPlayingWrap} title={nowPlayingName}>
+        <div ref={bottomActionsRef} style={responsiveBottomActionsStyle}>
+          <div style={responsiveNowPlayingWrapStyle} title={nowPlayingName}>
             <span style={styles.nowPlayingLabel}>Now Playing:</span>
             <span style={styles.nowPlayingValue}>{nowPlayingName}</span>
           </div>
@@ -3035,6 +3053,7 @@ const App: React.FC = () => {
         <div
           style={{
             ...styles.infoBar,
+            ...responsiveInfoBarStyle,
             borderColor: tokens.border,
             background: tokens.flyout,
             backdropFilter: "blur(14px) saturate(1.1)",
@@ -3179,7 +3198,7 @@ const App: React.FC = () => {
         {playlist.length > 0 && (
           <section
             style={{
-              ...styles.playlistDock,
+              ...responsivePlaylistDockStyle,
               borderColor: tokens.border,
               background: tokens.flyout,
               backdropFilter: "blur(14px) saturate(1.1)",
@@ -3226,7 +3245,7 @@ const App: React.FC = () => {
                 return (
                   <div
                     key={`${item}-${index}`}
-                    style={styles.queueRow}
+                    style={responsiveQueueRowStyle}
                     draggable={isHost}
                     onDragStart={() => setDragFromIndex(index)}
                     onDragOver={(event) => event.preventDefault()}
@@ -3242,7 +3261,7 @@ const App: React.FC = () => {
                     <div style={styles.queueIndex}>{index + 1}</div>
                     <div
                       style={{
-                        ...styles.queueThumb,
+                        ...responsiveQueueThumbStyle,
                         backgroundImage: qThumb
                           ? `url("${qThumb}")`
                           : qFallbackBg
@@ -3259,9 +3278,9 @@ const App: React.FC = () => {
                       )}
                     </div>
                     <div style={styles.queueTextCol}>
-                      <div style={styles.queueItem} title={item}>{itemDisplayName}</div>
+                      <div style={responsiveQueueItemStyle} title={item}>{itemDisplayName}</div>
                       {!!addedByUserId && (
-                        <div style={styles.queueByline} title={`Added by ${addedByName}`}>
+                        <div style={responsiveQueueBylineStyle} title={`Added by ${addedByName}`}>
                           {addedByName}
                         </div>
                       )}
@@ -3280,12 +3299,12 @@ const App: React.FC = () => {
         )}
         {roomModalOpen && (
           <div style={themedModalOverlayStyle} onClick={() => setRoomModalOpen(false)}>
-            <section
-              style={{
-                ...styles.roomModal,
-                borderColor: tokens.border,
-                background: tokens.flyout,
-                color: tokens.text,
+              <section
+                style={{
+                  ...responsiveRoomModalStyle,
+                  borderColor: tokens.border,
+                  background: tokens.flyout,
+                  color: tokens.text,
                 backdropFilter: "blur(18px) saturate(1.12)",
                 WebkitBackdropFilter: "blur(18px) saturate(1.12)"
               }}
@@ -4173,7 +4192,7 @@ function getRoomIdFromHash(hashValue: string): string {
   return (room ? decodeURIComponent(room) : "").trim();
 }
 
-function hostPopupStyle(tokens: ThemeTokens, open: boolean, popupType: HostPopup, isLightTheme: boolean): React.CSSProperties {
+function hostPopupStyle(tokens: ThemeTokens, open: boolean, popupType: HostPopup, isLightTheme: boolean, isMobile: boolean): React.CSSProperties {
   const isMediaPopup = popupType === "media";
   const isSubtitlePopup = popupType === "subtitle";
   const mediaPopupBackground = isLightTheme
@@ -4199,6 +4218,8 @@ function hostPopupStyle(tokens: ThemeTokens, open: boolean, popupType: HostPopup
     maxHeight: isSubtitlePopup ? "min(64vh, 520px)" : undefined,
     overflowX: "hidden",
     overflowY: isSubtitlePopup ? "auto" : "visible",
+    right: isMobile ? "8px" : "12px",
+    bottom: isMobile ? "8px" : "12px",
     opacity: open ? 1 : 0,
     transform: open ? "translateY(0)" : "translateY(8px)",
     pointerEvents: open ? "auto" : "none"
