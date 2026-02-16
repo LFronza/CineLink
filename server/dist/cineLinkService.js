@@ -1259,9 +1259,8 @@ function toGoogleDriveDirectMediaUrl(url) {
     if (!fileId) {
         return undefined;
     }
-    const direct = new URL("https://drive.usercontent.google.com/download");
-    direct.searchParams.set("export", "download");
-    direct.searchParams.set("confirm", "t");
+    const direct = new URL("https://drive.google.com/uc");
+    direct.searchParams.set("export", "view");
     direct.searchParams.set("id", fileId);
     const resourceKey = url.searchParams.get("resourcekey");
     if (resourceKey) {
@@ -1270,9 +1269,8 @@ function toGoogleDriveDirectMediaUrl(url) {
     return direct.toString();
 }
 function toGoogleDriveDirectMediaUrlFromFileId(fileId, resourceKey) {
-    const direct = new URL("https://drive.usercontent.google.com/download");
-    direct.searchParams.set("export", "download");
-    direct.searchParams.set("confirm", "t");
+    const direct = new URL("https://drive.google.com/uc");
+    direct.searchParams.set("export", "view");
     direct.searchParams.set("id", fileId);
     if (resourceKey) {
         direct.searchParams.set("resourcekey", resourceKey);
@@ -1391,23 +1389,39 @@ async function enrichMediaUrlLabel(urlValue) {
         if (!response.ok) {
             return urlValue;
         }
-        const fileName = parseFileNameFromContentDisposition(response.headers.get("content-disposition"));
-        if (!fileName) {
-            return urlValue;
+        const contentLength = parsePositiveInt(response.headers.get("content-length"));
+        if (contentLength !== undefined) {
+            parsed.searchParams.set("cinelink_size", String(contentLength));
         }
-        parsed.searchParams.set("cinelink_name", fileName.slice(0, 160));
+        const fileName = parseFileNameFromContentDisposition(response.headers.get("content-disposition"));
+        if (fileName) {
+            parsed.searchParams.set("cinelink_name", fileName.slice(0, 160));
+        }
         return parsed.toString();
     }
     catch {
         return urlValue;
     }
 }
+function parsePositiveInt(raw) {
+    if (!raw) {
+        return undefined;
+    }
+    const value = Number(raw.trim());
+    if (!Number.isFinite(value) || value <= 0) {
+        return undefined;
+    }
+    return Math.floor(value);
+}
 function isGoogleDriveDirectDownloadUrl(url) {
     const host = url.hostname.toLowerCase();
-    if (host !== "drive.usercontent.google.com") {
-        return false;
+    if (host === "drive.usercontent.google.com") {
+        return url.pathname === "/download";
     }
-    return url.pathname === "/download";
+    if (host === "drive.google.com" || host.endsWith(".drive.google.com")) {
+        return url.pathname === "/uc" && !!sanitizeDriveFileId(url.searchParams.get("id"));
+    }
+    return false;
 }
 function parseFileNameFromContentDisposition(raw) {
     if (!raw) {

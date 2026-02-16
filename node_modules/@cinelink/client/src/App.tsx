@@ -3,6 +3,7 @@ import brandLogoAsset from "./assets/logo.png";
 import { RootClientThemeEvent, rootClient } from "@rootsdk/client-app";
 import { CineLinkServiceClientEvent, cineLinkServiceClient } from "@cinelink/gen-client";
 import { MutationResponse, RoomState, RoomSummary, StateChangedEvent } from "@cinelink/gen-shared";
+import "plyr/dist/plyr.css";
 
 type AppView = "lobby" | "room";
 type HostPopup = "room" | "media" | "subtitle" | "audio" | null;
@@ -48,6 +49,7 @@ const App: React.FC = () => {
   const ambilightVideoRef = useRef<HTMLVideoElement>(null);
   const ytContainerRef = useRef<HTMLDivElement>(null);
   const ytPlayerRef = useRef<any>(null);
+  const plyrRef = useRef<any>(null);
   const ytLoadedIdRef = useRef<string>("");
   const subtitleUploadInputRef = useRef<HTMLInputElement>(null);
   const hostPopupRef = useRef<HTMLElement>(null);
@@ -75,6 +77,9 @@ const App: React.FC = () => {
   const [roomModalOpen, setRoomModalOpen] = useState(false);
   const [roomModalMode, setRoomModalMode] = useState<RoomModalMode>("create");
   const [ytApiReady, setYtApiReady] = useState(false);
+  const [viewportWidth, setViewportWidth] = useState<number>(
+    typeof window === "undefined" ? 1280 : window.innerWidth
+  );
   const [dragFromIndex, setDragFromIndex] = useState<number | null>(null);
   const [ambilightEnabled, setAmbilightEnabled] = useState(true);
   const ambilightSpread = 25;
@@ -94,13 +99,17 @@ const App: React.FC = () => {
   const [activeVideoAudioTrackIndex, setActiveVideoAudioTrackIndex] = useState(-1);
   const [playbackMediaUrl, setPlaybackMediaUrl] = useState("");
   const [driveIframeFallbackFor, setDriveIframeFallbackFor] = useState("");
+  const [youtubeNowPlayingTitle, setYoutubeNowPlayingTitle] = useState("");
   const [selfSyncingPlayback, setSelfSyncingPlayback] = useState(false);
   const [actionStates, setActionStates] = useState<Record<string, "loading" | "done">>({});
   const [hostTransferCandidateUserId, setHostTransferCandidateUserId] = useState("");
   const triedMkvFallbackRef = useRef<Record<string, boolean>>({});
+  const triedDriveVariantRef = useRef<Record<string, boolean>>({});
   const thumbCapturePlanRef = useRef<{ url: string; nextAt: number; step: number } | null>(null);
 
   const tokens = themeMode === "dark" ? darkTokens : lightTokens;
+  const isMobile = viewportWidth <= 768;
+  const isNarrowMobile = viewportWidth <= 480;
   const isLightTheme = themeMode === "light";
   const isJoined = roomId.length > 0;
   const isHost = isJoined && roomState.hostUserId === me;
@@ -126,6 +135,9 @@ const App: React.FC = () => {
   const hasSelectableMkvAudioTracks = isLikelyMkvUrl(activeMediaSource) && videoAudioTracks.length > 1;
   const canOpenAudioPopup = isJoined && !isIframeMode && hasSelectableMkvAudioTracks;
   const hasLoadedSubtitle = !!subtitleTrackUrl || activeVideoTrackIndex >= 0;
+  const nowPlayingName = youtubeVideoId
+    ? getReadableRoomName(youtubeNowPlayingTitle || "YouTube video", "YouTube video")
+    : getReadableRoomName(getMediaDisplayName(activeMediaSource), "No media loaded");
   const canSubmitRoomModal = newRoomNameInput.trim().length > 3;
   const canSubmitJoinRoom = normalizeJoinTarget(joinRoomInput).length > 0;
   const isJoinModal = roomModalMode === "join";
@@ -135,9 +147,6 @@ const App: React.FC = () => {
   const syncMode = (roomState.syncMode || "").trim().toLowerCase();
   const syncReadyUserIds = roomState.syncReadyUserIds || [];
   const syncReadySet = useMemo(() => new Set(syncReadyUserIds), [syncReadyUserIds]);
-  const genericSyncActive = isIframeMode && !youtubeVideoId && syncMode === "generic";
-  const genericSyncLaunched = genericSyncActive && Number(roomState.syncLaunchAtMs || BigInt(0)) > 0;
-  const allGenericReady = participants.length > 0 && participants.every((id) => syncReadySet.has(id));
   const ambilightSpreadRatio = Math.max(0, Math.min(1, ambilightSpread / 100));
   const ambilightInsetPx = Math.round(10 + ambilightSpreadRatio * 180);
   const ambilightBlurPx = Math.round(28 + ambilightSpreadRatio * 130);
@@ -223,6 +232,108 @@ const App: React.FC = () => {
   const themedModalOverlayStyle: React.CSSProperties = isLightTheme
     ? { ...styles.modalOverlay, background: "rgba(224,231,244,0.34)", backdropFilter: "blur(10px)", WebkitBackdropFilter: "blur(10px)" }
     : { ...styles.modalOverlay, background: "rgba(2,6,16,0.5)", backdropFilter: "blur(8px)", WebkitBackdropFilter: "blur(8px)" };
+  const responsivePageStyle: React.CSSProperties = {
+    ...styles.page,
+    padding: isMobile ? "8px" : "20px"
+  };
+  const responsiveLobbyShellStyle: React.CSSProperties = {
+    ...styles.lobbyShell,
+    maxWidth: isMobile ? "100%" : styles.lobbyShell.maxWidth,
+    borderRadius: isMobile ? "16px" : styles.lobbyShell.borderRadius,
+    padding: isMobile ? "12px" : styles.lobbyShell.padding
+  };
+  const responsiveLobbyTitleStyle: React.CSSProperties = {
+    ...styles.lobbyTitle,
+    margin: isMobile ? "10px 0 10px" : styles.lobbyTitle.margin,
+    fontSize: isNarrowMobile ? "2.15rem" : isMobile ? "2.45rem" : styles.lobbyTitle.fontSize
+  };
+  const responsiveRoomGridStyle: React.CSSProperties = {
+    ...styles.roomGrid,
+    gridTemplateColumns: isMobile ? "1fr" : styles.roomGrid.gridTemplateColumns,
+    justifyContent: isMobile ? "stretch" : styles.roomGrid.justifyContent
+  };
+  const responsiveRoomCardStyle: React.CSSProperties = {
+    ...styles.roomCard,
+    minHeight: isMobile ? "190px" : styles.roomCard.minHeight,
+    padding: isMobile ? "8px" : styles.roomCard.padding
+  };
+  const responsiveRoomModalStyle: React.CSSProperties = {
+    ...styles.roomModal,
+    width: isMobile ? "min(560px, calc(100vw - 20px))" : styles.roomModal.width,
+    borderRadius: isMobile ? "18px" : styles.roomModal.borderRadius,
+    padding: isMobile ? "12px" : styles.roomModal.padding
+  };
+  const responsivePlayerShellStyle: React.CSSProperties = {
+    ...styles.playerShell,
+    maxWidth: isMobile ? "100%" : styles.playerShell.maxWidth,
+    borderRadius: isMobile ? "14px" : styles.playerShell.borderRadius
+  };
+  const responsivePlayerHeaderStyle: React.CSSProperties = {
+    ...themedPlayerHeaderStyle,
+    padding: isMobile ? "10px 10px" : themedPlayerHeaderStyle.padding
+  };
+  const responsivePlayerTitleStyle: React.CSSProperties = {
+    ...styles.playerTitle,
+    maxWidth: isMobile ? "68%" : styles.playerTitle.maxWidth,
+    fontSize: isNarrowMobile ? "1.5rem" : isMobile ? "1.65rem" : styles.playerTitle.fontSize
+  };
+  const responsiveVideoStyle: React.CSSProperties = {
+    ...styles.video,
+    minHeight: isMobile ? "34vh" : styles.video.minHeight,
+    maxHeight: isMobile ? "52vh" : styles.video.maxHeight
+  };
+  const responsiveVideoFrameWrapStyle: React.CSSProperties = {
+    ...styles.videoFrameWrap,
+    minHeight: isMobile ? "34vh" : styles.videoFrameWrap.minHeight,
+    maxHeight: isMobile ? "52vh" : styles.videoFrameWrap.maxHeight
+  };
+  const responsiveBottomActionsStyle: React.CSSProperties = {
+    ...styles.playerBottomActions,
+    flexWrap: isMobile ? "wrap" : "nowrap",
+    rowGap: isMobile ? "8px" : styles.playerBottomActions.gap
+  };
+  const responsiveNowPlayingWrapStyle: React.CSSProperties = {
+    ...styles.nowPlayingWrap,
+    flexBasis: isMobile ? "100%" : "auto",
+    order: isMobile ? 2 : 1
+  };
+  const responsiveInfoBarStyle: React.CSSProperties = {
+    ...styles.infoBar,
+    margin: isMobile ? "8px 8px 6px" : styles.infoBar.margin,
+    padding: isMobile ? "8px" : styles.infoBar.padding
+  };
+  const responsivePlaylistDockStyle: React.CSSProperties = {
+    ...styles.playlistDock,
+    margin: isMobile ? "8px 8px 0" : styles.playlistDock.margin,
+    padding: isMobile ? "8px" : styles.playlistDock.padding
+  };
+  const plyrThemeVars: React.CSSProperties = isLightTheme
+    ? {
+      ["--plyr-color-main" as any]: "#4f7ee8",
+      ["--plyr-video-controls-background" as any]: "linear-gradient(180deg, rgba(228,238,255,0.54), rgba(198,216,248,0.72))",
+      ["--plyr-menu-background" as any]: "rgba(242,247,255,0.9)",
+      ["--plyr-menu-color" as any]: "#1f2d4d",
+      ["--plyr-control-icon-size" as any]: "15px",
+      ["--plyr-control-radius" as any]: "11px",
+      ["--cinelink-plyr-control-bg" as any]: "rgba(36,65,120,0.08)",
+      ["--cinelink-plyr-control-border" as any]: "rgba(118,153,222,0.42)",
+      ["--cinelink-plyr-control-color" as any]: "#1d2b48",
+      ["--cinelink-plyr-control-hover-bg" as any]: "rgba(86,138,236,0.2)",
+      ["--cinelink-plyr-control-hover-border" as any]: "rgba(116,164,247,0.62)"
+    }
+    : {
+      ["--plyr-color-main" as any]: "#5b95ff",
+      ["--plyr-video-controls-background" as any]: "linear-gradient(180deg, rgba(10,20,44,0.54), rgba(7,14,33,0.8))",
+      ["--plyr-menu-background" as any]: "rgba(8,17,38,0.92)",
+      ["--plyr-menu-color" as any]: "#e8efff",
+      ["--plyr-control-icon-size" as any]: "15px",
+      ["--plyr-control-radius" as any]: "11px",
+      ["--cinelink-plyr-control-bg" as any]: "rgba(255,255,255,0.08)",
+      ["--cinelink-plyr-control-border" as any]: "rgba(149,182,244,0.34)",
+      ["--cinelink-plyr-control-color" as any]: "#eef4ff",
+      ["--cinelink-plyr-control-hover-bg" as any]: "rgba(97,154,255,0.24)",
+      ["--cinelink-plyr-control-hover-border" as any]: "rgba(153,196,255,0.66)"
+    };
 
   useEffect(() => {
     isHostRef.current = isHost;
@@ -251,6 +362,7 @@ const App: React.FC = () => {
   useEffect(() => {
     setPlaybackMediaUrl((roomState.mediaUrl || "").trim());
     triedMkvFallbackRef.current = {};
+    triedDriveVariantRef.current = {};
     setDriveIframeFallbackFor("");
   }, [roomState.mediaUrl]);
 
@@ -264,10 +376,78 @@ const App: React.FC = () => {
   }, [driveIframeFallbackFor, activeMediaSource]);
 
   useEffect(() => {
+    if (!youtubeVideoId && youtubeNowPlayingTitle) {
+      setYoutubeNowPlayingTitle("");
+    }
+  }, [youtubeVideoId, youtubeNowPlayingTitle]);
+
+  useEffect(() => {
+    if (!activeMediaSource || youtubeVideoId) {
+      return;
+    }
+    if (!getGoogleDrivePreviewUrl(activeMediaSource)) {
+      return;
+    }
+    if (driveIframeFallbackFor === activeMediaSource) {
+      return;
+    }
+    setDriveIframeFallbackFor(activeMediaSource);
+    setStatus("Google Drive links use iframe mode for compatibility.");
+    addDebug("video:drive:auto-iframe", { source: activeMediaSource });
+  }, [activeMediaSource, youtubeVideoId, driveIframeFallbackFor]);
+
+  useEffect(() => {
     if (!isJoined || !(roomState.mediaUrl || "").trim()) {
       setSelfSyncingPlayback(false);
     }
   }, [isJoined, roomState.mediaUrl]);
+
+  useEffect(() => {
+    if (isIframeMode && selfSyncingPlayback) {
+      setSelfSyncingPlayback(false);
+    }
+  }, [isIframeMode, selfSyncingPlayback]);
+
+  useEffect(() => {
+    let disposed = false;
+    if (typeof window === "undefined") {
+      return;
+    }
+    if (isIframeMode) {
+      if (plyrRef.current) {
+        plyrRef.current.destroy();
+        plyrRef.current = null;
+      }
+      return;
+    }
+    const video = videoRef.current;
+    if (!video || plyrRef.current) {
+      return;
+    }
+    const setup = async (): Promise<void> => {
+      const mod: any = await import("plyr");
+      if (disposed || isIframeMode || plyrRef.current || !videoRef.current) {
+        return;
+      }
+      const PlyrCtor = mod?.default ?? mod;
+      plyrRef.current = new PlyrCtor(videoRef.current, {
+        controls: ["play", "progress", "current-time", "duration", "mute", "volume", "settings", "fullscreen"],
+        settings: ["speed"],
+        speed: {
+          selected: 1,
+          options: [0.5, 0.75, 1, 1.25, 1.5, 2]
+        }
+      });
+    };
+    void setup();
+    return () => {
+      disposed = true;
+      if (plyrRef.current) {
+        plyrRef.current.destroy();
+        plyrRef.current = null;
+      }
+    };
+  }, [isIframeMode]);
 
   useEffect(() => {
     if (!subtitleTrackUrl) {
@@ -290,6 +470,7 @@ const App: React.FC = () => {
         tracks[i].mode = i === tracks.length - 1 ? "showing" : "disabled";
       }
       const active = tracks[tracks.length - 1];
+      syncPlyrCaptions(true, Math.max(0, tracks.length - 1));
       subtitleDebug("track:showing", {
         trackCount: tracks.length,
         activeLabel: active?.label,
@@ -374,6 +555,23 @@ const App: React.FC = () => {
     setSubtitleLabel(label || "Subtitle");
   };
 
+  const syncPlyrCaptions = (active: boolean, preferredTrackIndex?: number): void => {
+    const player = plyrRef.current;
+    if (!player) {
+      return;
+    }
+    try {
+      if (player.captions && typeof player.captions === "object") {
+        player.captions.active = active;
+      }
+      if (active && typeof preferredTrackIndex === "number" && Number.isFinite(preferredTrackIndex)) {
+        player.currentTrack = preferredTrackIndex;
+      }
+    } catch {
+      // ignore plyr caption sync errors
+    }
+  };
+
   const clearLocalSubtitleTrack = (): void => {
     if (subtitleTrackUrl) {
       URL.revokeObjectURL(subtitleTrackUrl);
@@ -385,6 +583,7 @@ const App: React.FC = () => {
     setSubtitleBaseVttText("");
     setSubtitleOffsetMs(0);
     setActiveVideoTrackIndex(-1);
+    syncPlyrCaptions(false);
   };
 
   const refreshVideoSubtitleTracks = (): void => {
@@ -487,6 +686,11 @@ const App: React.FC = () => {
       tracks[i].mode = i === index ? "showing" : "disabled";
     }
     const chosen = index >= 0 ? videoSubtitleTracks.find((item) => item.index === index) : null;
+    if (index >= 0) {
+      syncPlyrCaptions(true, index);
+    } else {
+      syncPlyrCaptions(false);
+    }
     setStatus(chosen ? `Subtitle track selected: ${chosen.label}` : "Subtitle track disabled.");
     subtitleDebug("track:manual-select", { index, chosen: chosen?.label || "", total: tracks.length });
     refreshVideoSubtitleTracks();
@@ -776,7 +980,11 @@ const App: React.FC = () => {
       });
       setRoomId(normalizedRoomId);
       setRoomState(state);
-      setSelfSyncingPlayback(!!(state.mediaUrl || "").trim() && !getYouTubeVideoId(state.mediaUrl));
+      setSelfSyncingPlayback(
+        !!(state.mediaUrl || "").trim() &&
+        !getYouTubeVideoId(state.mediaUrl) &&
+        !getGoogleDrivePreviewUrl(state.mediaUrl)
+      );
       setMediaUrlInput(state.mediaUrl || "");
       setView("room");
       if (typeof window !== "undefined") {
@@ -1112,7 +1320,12 @@ const App: React.FC = () => {
   };
 
   const resolveMediaUrls = async (urls: string[]): Promise<string[]> => {
-    const resolved = await Promise.all(urls.map((url) => resolveArchiveMediaUrl(url)));
+    const resolved = await Promise.all(
+      urls.map(async (url) => {
+        const driveNormalized = toGoogleDriveDirectViewUrl(url);
+        return resolveArchiveMediaUrl(driveNormalized);
+      })
+    );
     return resolved;
   };
 
@@ -1263,6 +1476,43 @@ const App: React.FC = () => {
     }
   };
 
+  const updateYoutubeNowPlayingTitle = (): void => {
+    const player = ytPlayerRef.current;
+    if (!player) {
+      return;
+    }
+    try {
+      const data = player.getVideoData?.();
+      const title = (data?.title || "").trim();
+      if (!title || /^watch$/i.test(title)) {
+        setYoutubeNowPlayingTitle("YouTube video");
+        return;
+      }
+      setYoutubeNowPlayingTitle(title);
+    } catch {
+      setYoutubeNowPlayingTitle("YouTube video");
+    }
+  };
+
+  const tryApplyDriveDirectVariant = (rawUrl: string): boolean => {
+    const sourceUrl = (rawUrl || "").trim();
+    if (!sourceUrl) {
+      return false;
+    }
+    const alternateUrl = toGoogleDriveAlternateDirectUrl(sourceUrl);
+    if (!alternateUrl || alternateUrl === sourceUrl) {
+      return false;
+    }
+    if (triedDriveVariantRef.current[sourceUrl]) {
+      return false;
+    }
+    triedDriveVariantRef.current[sourceUrl] = true;
+    setPlaybackMediaUrl(alternateUrl);
+    setStatus("Trying alternate Google Drive direct URL...");
+    addDebug("video:drive-direct-variant", { from: sourceUrl, to: alternateUrl });
+    return true;
+  };
+
   const tryEnableDriveIframeFallback = (rawUrl: string): boolean => {
     const sourceUrl = (rawUrl || "").trim();
     if (!sourceUrl) {
@@ -1292,36 +1542,6 @@ const App: React.FC = () => {
       ready,
       currentTimeSeconds: Math.max(0, currentTimeSeconds)
     });
-  };
-
-  const startYoutubeSyncToSlowest = async (): Promise<void> => {
-    if (!isJoined || !isHost || !youtubeVideoId) {
-      return;
-    }
-    await runMutation(
-      cineLinkServiceClient.hostStartSync({ roomId, mode: "youtube" }),
-      "Sync to slowest started."
-    );
-  };
-
-  const startGenericManualSync = async (): Promise<void> => {
-    if (!isJoined || !isHost || youtubeVideoId || !isIframeMode) {
-      return;
-    }
-    await runMutation(
-      cineLinkServiceClient.hostStartSync({ roomId, mode: "generic" }),
-      "Manual sync started."
-    );
-  };
-
-  const launchGenericManualSync = async (): Promise<void> => {
-    if (!isJoined || !isHost || !genericSyncActive) {
-      return;
-    }
-    await runMutation(
-      cineLinkServiceClient.hostLaunchSync({ roomId }),
-      "Manual sync launch scheduled."
-    );
   };
 
   const closeHostPopupOnOutsideClick = (event: React.MouseEvent): void => {
@@ -1456,6 +1676,15 @@ const App: React.FC = () => {
   }, []);
 
   useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const onResize = (): void => setViewportWidth(window.innerWidth);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  useEffect(() => {
     const onStateChanged = (event: StateChangedEvent): void => {
       if (!isJoined || event.roomId !== roomId || !event.state) {
         return;
@@ -1572,6 +1801,7 @@ const App: React.FC = () => {
         events: {
           onReady: () => {
             ytLoadedIdRef.current = youtubeVideoId;
+            updateYoutubeNowPlayingTitle();
             if (isHostRef.current && roomIdRef.current) {
               const duration = Number(ytPlayerRef.current?.getDuration?.() || 0);
               if (duration > 0) {
@@ -1583,6 +1813,7 @@ const App: React.FC = () => {
             }
           },
           onStateChange: (event: any) => {
+            updateYoutubeNowPlayingTitle();
             if (suppressEvents.current || !isHostRef.current || !isJoinedRef.current) {
               return;
             }
@@ -1615,6 +1846,9 @@ const App: React.FC = () => {
       ytPlayerRef.current.cueVideoById?.(youtubeVideoId, 0);
       ytLoadedIdRef.current = youtubeVideoId;
       suppressEvents.current = false;
+      window.setTimeout(() => {
+        updateYoutubeNowPlayingTitle();
+      }, 120);
     }
   }, [youtubeVideoId, ytApiReady]);
 
@@ -1703,6 +1937,9 @@ const App: React.FC = () => {
       const code = video.error?.code ?? -1;
       const msg = `Media error (code=${code}) src=${video.currentSrc || "-"}`;
       const sourceForHint = video.currentSrc || playbackMediaUrl || roomState.mediaUrl;
+      if (tryApplyDriveDirectVariant(sourceForHint)) {
+        return;
+      }
       if (tryEnableDriveIframeFallback(sourceForHint)) {
         return;
       }
@@ -1719,6 +1956,9 @@ const App: React.FC = () => {
     const onLoadedMetadata = (): void => {
       if (video.videoWidth === 0 && video.videoHeight === 0 && video.duration > 0) {
         const sourceForHint = video.currentSrc || playbackMediaUrl || roomState.mediaUrl;
+        if (tryApplyDriveDirectVariant(sourceForHint)) {
+          return;
+        }
         const hint = `Video stream is not decodable in this browser (audio-only fallback). ${getMkvFailureHint(sourceForHint)}`;
         setVideoError(hint);
         setStatus("Video codec unsupported in browser.");
@@ -1746,6 +1986,9 @@ const App: React.FC = () => {
     const onLoadedData = (): void => {
       if (video.videoWidth === 0 && video.videoHeight === 0 && video.duration > 0) {
         const sourceForHint = video.currentSrc || playbackMediaUrl || roomState.mediaUrl;
+        if (tryApplyDriveDirectVariant(sourceForHint)) {
+          return;
+        }
         const hint = `Video stream is not decodable in this browser (audio-only fallback). ${getMkvFailureHint(sourceForHint)}`;
         setVideoError(hint);
         setStatus("Video codec unsupported in browser.");
@@ -2265,6 +2508,46 @@ const App: React.FC = () => {
           50% { background-position: 46% 54%, 48% 52%; }
           100% { background-position: 54% 46%, 52% 48%; }
         }
+        .plyr {
+          --plyr-font-family: "Segoe UI", "Inter", sans-serif;
+        }
+        .plyr--video {
+          border-radius: 0;
+          overflow: hidden;
+        }
+        .plyr--video .plyr__controls {
+          border-top: 1px solid rgba(128, 166, 235, 0.24);
+          backdrop-filter: blur(12px) saturate(1.12);
+          -webkit-backdrop-filter: blur(12px) saturate(1.12);
+        }
+        .plyr--video .plyr__control {
+          border: 1px solid var(--cinelink-plyr-control-border);
+          background: var(--cinelink-plyr-control-bg);
+          color: var(--cinelink-plyr-control-color);
+          transition: background-color 160ms ease, border-color 160ms ease, transform 160ms ease;
+        }
+        .plyr--video .plyr__control:hover {
+          background: var(--cinelink-plyr-control-hover-bg);
+          border-color: var(--cinelink-plyr-control-hover-border);
+          transform: translateY(-1px);
+        }
+        .plyr--video .plyr__control[aria-pressed="true"] {
+          background: rgba(88, 146, 255, 0.28);
+          border-color: rgba(172, 206, 255, 0.78);
+        }
+        .plyr--video .plyr__progress__buffer {
+          color: rgba(255, 255, 255, 0.25);
+        }
+        .plyr--video .plyr__menu__container {
+          border: 1px solid rgba(145, 180, 245, 0.35);
+          box-shadow: 0 12px 32px rgba(9, 18, 42, 0.38);
+          backdrop-filter: blur(16px) saturate(1.14);
+          -webkit-backdrop-filter: blur(16px) saturate(1.14);
+        }
+        .plyr__tooltip {
+          backdrop-filter: blur(10px);
+          -webkit-backdrop-filter: blur(10px);
+        }
       `}</style>
       <section
         style={{ ...styles.playerShell, borderColor: tokens.border, background: tokens.glass, ...liquidShellSurfaceStyle }}
@@ -2282,7 +2565,7 @@ const App: React.FC = () => {
           <div style={styles.playerHeaderActions} />
         </div>
 
-        <div style={styles.videoStage}>
+        <div style={{ ...styles.videoStage, ...plyrThemeVars }}>
           {isAmbilightActive && (
             isIframeMode ? (
               <>
@@ -2388,40 +2671,8 @@ const App: React.FC = () => {
             </video>
           )}
 
-          {genericSyncActive && (
-            <div style={styles.syncOverlay}>
-              <strong style={styles.syncOverlayTitle}>Manual Sync</strong>
-              <p style={styles.syncOverlayText}>
-                {genericSyncLaunched
-                  ? "Launch scheduled. Prepare playback now."
-                  : "Pause and prepare. Mark ready when your player is at the desired point."}
-              </p>
-              <div style={styles.syncOverlayMeta}>
-                Ready: {syncReadyUserIds.length}/{participants.length}
-              </div>
-              <div style={styles.syncOverlayActions}>
-                <button
-                  style={styles.syncOverlayButton}
-                  onClick={() => void runWithActionState("sync:ready", async () => { await reportSyncStatus(true, 0); })}
-                >
-                  {renderActionContent("sync:ready", "Ready")}
-                </button>
-                {isHost && (
-                  <button
-                    style={styles.syncOverlayButton}
-                    onClick={() => void runWithActionState("sync:launch", launchGenericManualSync)}
-                    disabled={!allGenericReady}
-                    title={allGenericReady ? "Launch for everyone" : "Wait until everyone is ready"}
-                  >
-                    {renderActionContent("sync:launch", "Launch")}
-                  </button>
-                )}
-              </div>
-            </div>
-          )}
-
           {hostPopup && ((hostPopup === "room" && isHost) || (hostPopup === "media" && (isHost || roomState.allowViewerQueueAdd)) || (hostPopup === "subtitle" && canOpenSubtitlePopup) || (hostPopup === "audio" && canOpenAudioPopup)) && (
-            <aside ref={hostPopupRef} style={hostPopupStyle(tokens, true, hostPopup === "media", isLightTheme)}>
+            <aside ref={hostPopupRef} style={hostPopupStyle(tokens, true, hostPopup, isLightTheme)}>
               {hostPopup === "room" && (
                 <div style={styles.flyoutBody}>
                   <h3 style={styles.flyoutTitle}>Room</h3>
@@ -2709,6 +2960,10 @@ const App: React.FC = () => {
         </div>
 
         <div ref={bottomActionsRef} style={styles.playerBottomActions}>
+          <div style={styles.nowPlayingWrap} title={nowPlayingName}>
+            <span style={styles.nowPlayingLabel}>Now Playing:</span>
+            <span style={styles.nowPlayingValue}>{nowPlayingName}</span>
+          </div>
           <button
             style={{ ...themedIconButtonStyle, opacity: isAmbilightAvailable ? (ambilightEnabled ? 1 : 0.66) : 0.42, cursor: isAmbilightAvailable ? "pointer" : "not-allowed" }}
             onClick={() => {
@@ -2730,24 +2985,6 @@ const App: React.FC = () => {
           >
             {renderActionContent("room:claim-host", "♛")}
           </button>
-          {isHost && !!youtubeVideoId && (
-            <button
-              style={themedIconButtonStyle}
-              onClick={() => void runWithActionState("sync:youtube", startYoutubeSyncToSlowest)}
-              title="Sync YouTube to slowest participant"
-            >
-              {renderActionContent("sync:youtube", "⟲")}
-            </button>
-          )}
-          {isHost && isIframeMode && !youtubeVideoId && (
-            <button
-              style={themedIconButtonStyle}
-              onClick={() => void runWithActionState("sync:manual-start", startGenericManualSync)}
-              title="Start manual sync"
-            >
-              {renderActionContent("sync:manual-start", "SYNC")}
-            </button>
-          )}
           {canOpenMediaPopup && (
             <>
               <button
@@ -3227,6 +3464,82 @@ function getGoogleDrivePreviewUrl(url: string | undefined): string | undefined {
   return `https://drive.google.com/file/d/${fileId}/preview`;
 }
 
+function toGoogleDriveDirectViewUrl(url: string): string {
+  const raw = (url || "").trim();
+  if (!raw) {
+    return raw;
+  }
+  const fileId = getGoogleDriveFileId(raw);
+  if (!fileId) {
+    return raw;
+  }
+  try {
+    const parsed = new URL(raw);
+    const direct = new URL("https://drive.google.com/uc");
+    direct.searchParams.set("export", "view");
+    direct.searchParams.set("id", fileId);
+    const resourceKey = (parsed.searchParams.get("resourcekey") || "").trim();
+    if (resourceKey) {
+      direct.searchParams.set("resourcekey", resourceKey);
+    }
+    return direct.toString();
+  } catch {
+    return raw;
+  }
+}
+
+function toGoogleDriveDirectDownloadUrl(url: string): string {
+  const raw = (url || "").trim();
+  if (!raw) {
+    return raw;
+  }
+  const fileId = getGoogleDriveFileId(raw);
+  if (!fileId) {
+    return raw;
+  }
+  try {
+    const parsed = new URL(raw);
+    const direct = new URL("https://drive.usercontent.google.com/download");
+    direct.searchParams.set("export", "download");
+    direct.searchParams.set("confirm", "t");
+    direct.searchParams.set("id", fileId);
+    const resourceKey = (parsed.searchParams.get("resourcekey") || "").trim();
+    if (resourceKey) {
+      direct.searchParams.set("resourcekey", resourceKey);
+    }
+    return direct.toString();
+  } catch {
+    return raw;
+  }
+}
+
+function toGoogleDriveAlternateDirectUrl(url: string): string | undefined {
+  const raw = (url || "").trim();
+  if (!raw) {
+    return undefined;
+  }
+  const fileId = getGoogleDriveFileId(raw);
+  if (!fileId) {
+    return undefined;
+  }
+  try {
+    const parsed = new URL(raw);
+    const host = parsed.hostname.toLowerCase();
+    const isUcView = (host === "drive.google.com" || host.endsWith(".drive.google.com"))
+      && parsed.pathname === "/uc";
+    const isUsercontentDownload = host === "drive.usercontent.google.com" && parsed.pathname === "/download";
+    if (isUcView) {
+      return toGoogleDriveDirectDownloadUrl(raw);
+    }
+    if (isUsercontentDownload) {
+      return toGoogleDriveDirectViewUrl(raw);
+    }
+    return toGoogleDriveDirectDownloadUrl(raw);
+  } catch {
+    return undefined;
+  }
+}
+
 function CrownIcon(): JSX.Element {
   return (
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -3605,6 +3918,10 @@ function getMediaDisplayName(url: string): string {
 
   try {
     const parsed = new URL(raw);
+    const host = parsed.hostname.toLowerCase();
+    const isYouTubeHost = host.includes("youtube.com") || host === "youtu.be";
+    const isDriveHost = host.includes("drive.google.com") || host.includes("drive.usercontent.google.com") || host.includes("docs.google.com");
+    const genericTokens = new Set(["watch", "view", "download", "uc", "preview", "file"]);
     const explicitName = (parsed.searchParams.get("cinelink_name") || "").trim();
     if (explicitName) {
       const labeled = cleanSegment(explicitName);
@@ -3614,8 +3931,14 @@ function getMediaDisplayName(url: string): string {
     }
     const tail = parsed.pathname.split("/").filter(Boolean).pop() || "";
     const readable = cleanSegment(tail);
-    if (readable) {
+    if (readable && !genericTokens.has(readable.toLowerCase())) {
       return shortenLabel(readable, 56);
+    }
+    if (isYouTubeHost) {
+      return "YouTube video";
+    }
+    if (isDriveHost) {
+      return "Google Drive video";
     }
     return shortenLabel(parsed.hostname, 56);
   } catch {
@@ -3850,7 +4173,9 @@ function getRoomIdFromHash(hashValue: string): string {
   return (room ? decodeURIComponent(room) : "").trim();
 }
 
-function hostPopupStyle(tokens: ThemeTokens, open: boolean, isMediaPopup: boolean, isLightTheme: boolean): React.CSSProperties {
+function hostPopupStyle(tokens: ThemeTokens, open: boolean, popupType: HostPopup, isLightTheme: boolean): React.CSSProperties {
+  const isMediaPopup = popupType === "media";
+  const isSubtitlePopup = popupType === "subtitle";
   const mediaPopupBackground = isLightTheme
     ? "linear-gradient(155deg, rgba(255,255,255,0.34), rgba(237,245,255,0.22) 58%, rgba(221,234,255,0.18))"
     : "linear-gradient(180deg, rgba(6,11,24,0.96), rgba(8,14,30,0.94))";
@@ -3869,6 +4194,11 @@ function hostPopupStyle(tokens: ThemeTokens, open: boolean, isMediaPopup: boolea
       : styles.hostPopup.boxShadow,
     backdropFilter: isMediaPopup ? (isLightTheme ? "blur(20px) saturate(1.15)" : "blur(14px)") : undefined,
     WebkitBackdropFilter: isMediaPopup ? (isLightTheme ? "blur(20px) saturate(1.15)" : "blur(14px)") : undefined,
+    width: isMediaPopup ? "340px" : isSubtitlePopup ? "420px" : "320px",
+    maxWidth: "calc(100vw - 56px)",
+    maxHeight: isSubtitlePopup ? "min(64vh, 520px)" : undefined,
+    overflowX: "hidden",
+    overflowY: isSubtitlePopup ? "auto" : "visible",
     opacity: open ? 1 : 0,
     transform: open ? "translateY(0)" : "translateY(8px)",
     pointerEvents: open ? "auto" : "none"
@@ -4164,7 +4494,7 @@ const styles: Record<string, React.CSSProperties> = {
   roomTopOverlay: {
     borderRadius: "10px",
     padding: "6px 8px",
-    background: "linear-gradient(180deg, rgba(0,0,0,0.42), rgba(0,0,0,0.1))"
+    background: "transparent"
   },
   badge: {
     fontSize: "0.95rem"
@@ -4239,7 +4569,7 @@ const styles: Record<string, React.CSSProperties> = {
     margin: "0 auto",
     border: "1px solid",
     borderRadius: "18px",
-    overflow: "visible",
+    overflow: "hidden",
     backdropFilter: "blur(12px)",
     WebkitBackdropFilter: "blur(12px)",
     paddingBottom: "12px",
@@ -4270,9 +4600,34 @@ const styles: Record<string, React.CSSProperties> = {
   },
   playerBottomActions: {
     display: "flex",
-    justifyContent: "flex-end",
+    alignItems: "center",
+    justifyContent: "space-between",
     gap: "10px",
     padding: "10px 12px 6px"
+  },
+  nowPlayingWrap: {
+    display: "flex",
+    alignItems: "baseline",
+    gap: "6px",
+    minWidth: 0,
+    flex: "1 1 auto",
+    marginRight: "10px"
+  },
+  nowPlayingLabel: {
+    fontSize: "0.8rem",
+    fontWeight: 700,
+    letterSpacing: "0.04em",
+    opacity: 0.82,
+    flexShrink: 0
+  },
+  nowPlayingValue: {
+    fontSize: "0.92rem",
+    fontWeight: 600,
+    opacity: 0.94,
+    minWidth: 0,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap"
   },
   videoStage: {
     position: "relative",
@@ -4704,8 +5059,8 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: "pointer"
   },
   subtitleOffsetRow: {
-    display: "grid",
-    gridTemplateColumns: "auto auto auto auto 1fr auto",
+    display: "flex",
+    flexWrap: "wrap",
     gap: "8px",
     alignItems: "center"
   },
@@ -4747,7 +5102,9 @@ const styles: Record<string, React.CSSProperties> = {
   },
   subtitleEmbeddedList: {
     display: "grid",
-    gap: "6px"
+    gap: "6px",
+    maxHeight: "138px",
+    overflowY: "auto"
   },
   subtitleEmbeddedRow: {
     display: "flex",
