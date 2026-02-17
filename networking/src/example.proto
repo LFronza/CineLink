@@ -27,6 +27,10 @@ message RoomState {
   uint64 sync_launch_at_ms = 22;
   string sync_mode = 23;
   repeated string sync_ready_user_ids = 24;
+  string media_source_type = 25;
+  string resolved_media_url = 26;
+  string media_pipeline_status = 27;
+  string media_pipeline_message = 28;
 }
 
 message GetRoomStateRequest {

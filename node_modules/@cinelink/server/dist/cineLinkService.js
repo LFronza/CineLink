@@ -7,6 +7,8 @@ exports.cineLinkService = exports.CineLinkService = void 0;
 const gen_server_1 = require("@cinelink/gen-server");
 const zlib_1 = require("zlib");
 const adm_zip_1 = __importDefault(require("adm-zip"));
+const mediaPipeline_1 = require("./mediaPipeline");
+const testDiagnostics_1 = require("./testDiagnostics");
 const DEFAULT_RATE = 1;
 class CineLinkService extends gen_server_1.CineLinkServiceBase {
     constructor() {
@@ -47,9 +49,12 @@ class CineLinkService extends gen_server_1.CineLinkServiceBase {
                 changed = true;
             }
         }
+        const pipelineChanged = await this.refreshMediaPipelineState(state);
+        changed = changed || pipelineChanged;
         if (changed) {
             this.touchState(state);
-            await this.broadcastState("participant:join", client.userId, state, client.communityId);
+            const action = !alreadyParticipant ? "participant:join" : (pipelineChanged ? "media:pipeline" : "state:refresh");
+            await this.broadcastState(action, client.userId, state, client.communityId);
         }
         serverLog("getRoomState", { roomId, hostUserId: state.hostUserId, version: String(state.version) });
         return { state };
@@ -208,6 +213,7 @@ class CineLinkService extends gen_server_1.CineLinkServiceBase {
         state.durationSeconds = 0;
         state.playlistUrls = expandedMediaUrls.slice(1);
         state.playlistAddedByUserIds = state.playlistUrls.map(() => client.userId);
+        await this.refreshMediaPipelineState(state);
         if (mediaBundle.sourceName) {
             state.roomName = normalizeRoomName(mediaBundle.sourceName);
         }
@@ -221,6 +227,116 @@ class CineLinkService extends gen_server_1.CineLinkServiceBase {
         });
         await this.broadcastState("media:set", client.userId, state, client.communityId);
         return this.accept(state);
+    }
+    async testBootstrapRoom(input) {
+        const roomId = normalizeRoomId(input.roomId || `test-${Math.random().toString(36).slice(2, 8)}`);
+        const hostUserId = (input.hostUserId || "test-host").trim() || "test-host";
+        const roomName = normalizeRoomName(input.roomName || roomId) || roomId;
+        const assertions = [];
+        const errors = [];
+        const testClient = this.makeTestClient(hostUserId);
+        (0, testDiagnostics_1.addTestLog)("test:scenario:start", { scenario: "bootstrap", roomId, roomName, mediaUrl: input.mediaUrl });
+        this.rooms.delete(roomId);
+        this.roomCommunities.delete(roomId);
+        this.roomPlaybackReports.delete(roomId);
+        const hostResult = await this.setHost({ roomId, hostUserId }, testClient);
+        assertions.push({ name: "host_set", ok: !!hostResult.accepted, details: hostResult.reason || "" });
+        if (!hostResult.accepted) {
+            errors.push(hostResult.reason || "setHost failed");
+        }
+        const roomNameResult = await this.setRoomName({ roomId, roomName }, testClient);
+        assertions.push({ name: "room_renamed", ok: !!roomNameResult.accepted, details: roomNameResult.reason || "" });
+        if (!roomNameResult.accepted) {
+            errors.push(roomNameResult.reason || "setRoomName failed");
+        }
+        const mediaResult = await this.setMedia({ roomId, url: input.mediaUrl }, testClient);
+        assertions.push({ name: "media_set", ok: !!mediaResult.accepted, details: mediaResult.reason || "" });
+        if (!mediaResult.accepted) {
+            errors.push(mediaResult.reason || "setMedia failed");
+        }
+        const state = this.rooms.get(roomId) || createDefaultRoomState(roomId);
+        const ok = errors.length === 0;
+        (0, testDiagnostics_1.addTestLog)(ok ? "test:scenario:ok" : "test:scenario:fail", { scenario: "bootstrap", roomId, errors });
+        return { ok, roomId, state, assertions, errors };
+    }
+    async testApplyRoomActions(input) {
+        const roomId = normalizeRoomId(input.roomId);
+        const actorUserId = (input.actorUserId || "test-host").trim() || "test-host";
+        const assertions = [];
+        const errors = [];
+        const testClient = this.makeTestClient(actorUserId);
+        (0, testDiagnostics_1.addTestLog)("test:scenario:start", { scenario: "actions", roomId, count: input.actions.length });
+        for (const action of input.actions) {
+            const kind = String(action.type || "").trim().toLowerCase();
+            let result;
+            try {
+                switch (kind) {
+                    case "play":
+                        result = await this.play({ roomId, atSeconds: Number(action.atSeconds ?? 0) }, testClient);
+                        break;
+                    case "pause":
+                        result = await this.pause({ roomId, atSeconds: Number(action.atSeconds ?? 0) }, testClient);
+                        break;
+                    case "seek":
+                        result = await this.seek({ roomId, atSeconds: Number(action.atSeconds ?? 0) }, testClient);
+                        break;
+                    case "setrate":
+                        result = await this.setRate({ roomId, playbackRate: Number(action.playbackRate ?? 1) }, testClient);
+                        break;
+                    case "addqueuelast":
+                        result = await this.addQueueLast({ roomId, url: String(action.url || "") }, testClient);
+                        break;
+                    case "advancequeue":
+                        result = await this.advanceQueue({ roomId, autoplay: Boolean(action.autoplay ?? true) }, testClient);
+                        break;
+                    case "previousqueue":
+                        result = await this.previousQueue({ roomId, autoplay: Boolean(action.autoplay ?? true) }, testClient);
+                        break;
+                    default:
+                        errors.push(`Unknown action type: ${kind}`);
+                        assertions.push({ name: `action:${kind}`, ok: false, details: "Unknown action" });
+                        continue;
+                }
+                const accepted = !!result?.accepted;
+                assertions.push({ name: `action:${kind}`, ok: accepted, details: result?.reason || "" });
+                if (!accepted) {
+                    errors.push(result?.reason || `Action failed: ${kind}`);
+                }
+            }
+            catch (error) {
+                const message = String(error);
+                assertions.push({ name: `action:${kind}`, ok: false, details: message });
+                errors.push(message);
+            }
+        }
+        const state = this.rooms.get(roomId) || createDefaultRoomState(roomId);
+        const ok = errors.length === 0;
+        (0, testDiagnostics_1.addTestLog)(ok ? "test:scenario:ok" : "test:scenario:fail", { scenario: "actions", roomId, errors });
+        return { ok, state, assertions, errors };
+    }
+    getTestRoomState(roomId) {
+        const normalized = normalizeRoomId(roomId);
+        return this.rooms.get(normalized) || createDefaultRoomState(normalized);
+    }
+    async testRefreshRoomState(roomId) {
+        const normalized = normalizeRoomId(roomId);
+        const state = this.rooms.get(normalized);
+        if (!state) {
+            return createDefaultRoomState(normalized);
+        }
+        const changed = await this.refreshMediaPipelineState(state);
+        if (changed) {
+            this.touchState(state);
+        }
+        return state;
+    }
+    clearAllTestRooms() {
+        const removedRooms = this.rooms.size;
+        this.rooms.clear();
+        this.roomCommunities.clear();
+        this.roomPlaybackReports.clear();
+        (0, testDiagnostics_1.addTestLog)("test:cleanup:rooms", { removedRooms });
+        return { removedRooms };
     }
     async addQueueNext(request, client) {
         return this.addToQueue(request, client, "next");
@@ -254,6 +370,7 @@ class CineLinkService extends gen_server_1.CineLinkServiceBase {
         state.currentTimeSeconds = 0;
         state.durationSeconds = 0;
         state.playing = request.autoplay;
+        await this.refreshMediaPipelineState(state);
         this.touchState(state);
         await this.broadcastState("queue:advance", client.userId, state, client.communityId);
         return this.accept(state);
@@ -281,6 +398,7 @@ class CineLinkService extends gen_server_1.CineLinkServiceBase {
         state.currentTimeSeconds = 0;
         state.durationSeconds = 0;
         state.playing = request.autoplay;
+        await this.refreshMediaPipelineState(state);
         this.touchState(state);
         await this.broadcastState("queue:previous", client.userId, state, client.communityId);
         return this.accept(state);
@@ -727,6 +845,32 @@ class CineLinkService extends gen_server_1.CineLinkServiceBase {
         this.rooms.set(normalizedId, created);
         return created;
     }
+    async refreshMediaPipelineState(state) {
+        const mediaUrl = (state.mediaUrl || "").trim();
+        const previousSourceType = (state.mediaSourceType || "").trim();
+        const previousResolvedUrl = (state.resolvedMediaUrl || "").trim();
+        const previousPipelineStatus = (state.mediaPipelineStatus || "").trim();
+        const previousPipelineMessage = (state.mediaPipelineMessage || "").trim();
+        if (!mediaUrl) {
+            state.mediaSourceType = "";
+            state.resolvedMediaUrl = "";
+            state.mediaPipelineStatus = "";
+            state.mediaPipelineMessage = "";
+            return (previousSourceType !== "" ||
+                previousResolvedUrl !== "" ||
+                previousPipelineStatus !== "" ||
+                previousPipelineMessage !== "");
+        }
+        const resolved = await (0, mediaPipeline_1.resolvePlaybackSource)(mediaUrl);
+        state.mediaSourceType = resolved.sourceType;
+        state.resolvedMediaUrl = resolved.resolvedUrl;
+        state.mediaPipelineStatus = resolved.pipelineStatus;
+        state.mediaPipelineMessage = resolved.pipelineMessage;
+        return (previousSourceType !== state.mediaSourceType ||
+            previousResolvedUrl !== state.resolvedMediaUrl ||
+            previousPipelineStatus !== state.mediaPipelineStatus ||
+            previousPipelineMessage !== state.mediaPipelineMessage);
+    }
     pruneEmptyRooms() {
         for (const [roomId, state] of this.rooms.entries()) {
             if ((state.participantUserIds || []).length === 0) {
@@ -776,6 +920,12 @@ class CineLinkService extends gen_server_1.CineLinkServiceBase {
     reject(reason, state) {
         return { accepted: false, reason, state: state ?? createDefaultRoomState("") };
     }
+    makeTestClient(userId) {
+        return {
+            userId,
+            communityId: "test-community"
+        };
+    }
 }
 exports.CineLinkService = CineLinkService;
 exports.cineLinkService = new CineLinkService();
@@ -804,7 +954,11 @@ function createDefaultRoomState(roomId) {
         syncTargetSeconds: 0,
         syncLaunchAtMs: BigInt(0),
         syncMode: "",
-        syncReadyUserIds: []
+        syncReadyUserIds: [],
+        mediaSourceType: "",
+        resolvedMediaUrl: "",
+        mediaPipelineStatus: "",
+        mediaPipelineMessage: ""
     };
 }
 function normalizeRoomId(value) {
@@ -1366,8 +1520,9 @@ function toGoogleDriveDirectMediaUrl(url) {
     if (!fileId) {
         return undefined;
     }
-    const direct = new URL("https://drive.google.com/uc");
-    direct.searchParams.set("export", "view");
+    const direct = new URL("https://drive.usercontent.google.com/download");
+    direct.searchParams.set("export", "download");
+    direct.searchParams.set("confirm", "t");
     direct.searchParams.set("id", fileId);
     const resourceKey = url.searchParams.get("resourcekey");
     if (resourceKey) {
@@ -1376,8 +1531,9 @@ function toGoogleDriveDirectMediaUrl(url) {
     return direct.toString();
 }
 function toGoogleDriveDirectMediaUrlFromFileId(fileId, resourceKey) {
-    const direct = new URL("https://drive.google.com/uc");
-    direct.searchParams.set("export", "view");
+    const direct = new URL("https://drive.usercontent.google.com/download");
+    direct.searchParams.set("export", "download");
+    direct.searchParams.set("confirm", "t");
     direct.searchParams.set("id", fileId);
     if (resourceKey) {
         direct.searchParams.set("resourcekey", resourceKey);

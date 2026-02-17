@@ -1,6 +1,6 @@
 {
   "name": "@cinelink/gen-server",
-  "version": "1.0.1771203503818",
+  "version": "1.0.1771362168751",
 	"dependencies": {
 		"@cinelink/gen-shared": "file:../shared"
 	},

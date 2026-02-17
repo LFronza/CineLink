@@ -29,7 +29,11 @@ class RoomState$Type extends MessageType {
             { no: 21, name: "sync_target_seconds", kind: "scalar", T: 1 /*ScalarType.DOUBLE*/ },
             { no: 22, name: "sync_launch_at_ms", kind: "scalar", T: 4 /*ScalarType.UINT64*/, L: 0 /*LongType.BIGINT*/ },
             { no: 23, name: "sync_mode", kind: "scalar", T: 9 /*ScalarType.STRING*/ },
-            { no: 24, name: "sync_ready_user_ids", kind: "scalar", repeat: 2 /*RepeatType.UNPACKED*/, T: 9 /*ScalarType.STRING*/ }
+            { no: 24, name: "sync_ready_user_ids", kind: "scalar", repeat: 2 /*RepeatType.UNPACKED*/, T: 9 /*ScalarType.STRING*/ },
+            { no: 25, name: "media_source_type", kind: "scalar", T: 9 /*ScalarType.STRING*/ },
+            { no: 26, name: "resolved_media_url", kind: "scalar", T: 9 /*ScalarType.STRING*/ },
+            { no: 27, name: "media_pipeline_status", kind: "scalar", T: 9 /*ScalarType.STRING*/ },
+            { no: 28, name: "media_pipeline_message", kind: "scalar", T: 9 /*ScalarType.STRING*/ }
         ]);
     }
     create(value) {
@@ -58,6 +62,10 @@ class RoomState$Type extends MessageType {
         message.syncLaunchAtMs = 0n;
         message.syncMode = "";
         message.syncReadyUserIds = [];
+        message.mediaSourceType = "";
+        message.resolvedMediaUrl = "";
+        message.mediaPipelineStatus = "";
+        message.mediaPipelineMessage = "";
         if (value !== undefined)
             reflectionMergePartial(this, message, value);
         return message;
@@ -138,6 +146,18 @@ class RoomState$Type extends MessageType {
                     break;
                 case /* repeated string sync_ready_user_ids */ 24:
                     message.syncReadyUserIds.push(reader.string());
+                    break;
+                case /* string media_source_type */ 25:
+                    message.mediaSourceType = reader.string();
+                    break;
+                case /* string resolved_media_url */ 26:
+                    message.resolvedMediaUrl = reader.string();
+                    break;
+                case /* string media_pipeline_status */ 27:
+                    message.mediaPipelineStatus = reader.string();
+                    break;
+                case /* string media_pipeline_message */ 28:
+                    message.mediaPipelineMessage = reader.string();
                     break;
                 default:
                     let u = options.readUnknownField;
@@ -223,6 +243,18 @@ class RoomState$Type extends MessageType {
         /* repeated string sync_ready_user_ids = 24; */
         for (let i = 0; i < message.syncReadyUserIds.length; i++)
             writer.tag(24, WireType.LengthDelimited).string(message.syncReadyUserIds[i]);
+        /* string media_source_type = 25; */
+        if (message.mediaSourceType !== "")
+            writer.tag(25, WireType.LengthDelimited).string(message.mediaSourceType);
+        /* string resolved_media_url = 26; */
+        if (message.resolvedMediaUrl !== "")
+            writer.tag(26, WireType.LengthDelimited).string(message.resolvedMediaUrl);
+        /* string media_pipeline_status = 27; */
+        if (message.mediaPipelineStatus !== "")
+            writer.tag(27, WireType.LengthDelimited).string(message.mediaPipelineStatus);
+        /* string media_pipeline_message = 28; */
+        if (message.mediaPipelineMessage !== "")
+            writer.tag(28, WireType.LengthDelimited).string(message.mediaPipelineMessage);
         let u = options.writeUnknownFields;
         if (u !== false)
             (u == true ? UnknownFieldHandler.onWrite : u)(this.typeName, message, writer);

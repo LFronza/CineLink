@@ -3,6 +3,8 @@ import brandLogoAsset from "./assets/logo.png";
 import { RootClientThemeEvent, rootClient } from "@rootsdk/client-app";
 import { CineLinkServiceClientEvent, cineLinkServiceClient } from "@cinelink/gen-client";
 import { MutationResponse, RoomState, RoomSummary, StateChangedEvent } from "@cinelink/gen-shared";
+import Hls from "hls.js";
+import * as PlyrModule from "plyr";
 import "plyr/dist/plyr.css";
 
 type AppView = "lobby" | "room";
@@ -39,7 +41,11 @@ const EMPTY_STATE: RoomState = {
   syncTargetSeconds: 0,
   syncLaunchAtMs: BigInt(0),
   syncMode: "",
-  syncReadyUserIds: []
+  syncReadyUserIds: [],
+  mediaSourceType: "",
+  resolvedMediaUrl: "",
+  mediaPipelineStatus: "",
+  mediaPipelineMessage: ""
 };
 
 const App: React.FC = () => {
@@ -50,6 +56,7 @@ const App: React.FC = () => {
   const ytContainerRef = useRef<HTMLDivElement>(null);
   const ytPlayerRef = useRef<any>(null);
   const plyrRef = useRef<any>(null);
+  const hlsRef = useRef<Hls | null>(null);
   const ytLoadedIdRef = useRef<string>("");
   const subtitleUploadInputRef = useRef<HTMLInputElement>(null);
   const hostPopupRef = useRef<HTMLElement>(null);
@@ -98,13 +105,13 @@ const App: React.FC = () => {
   const [videoAudioTracks, setVideoAudioTracks] = useState<VideoAudioTrackInfo[]>([]);
   const [activeVideoAudioTrackIndex, setActiveVideoAudioTrackIndex] = useState(-1);
   const [playbackMediaUrl, setPlaybackMediaUrl] = useState("");
-  const [driveIframeFallbackFor, setDriveIframeFallbackFor] = useState("");
+  const [plyrReady, setPlyrReady] = useState(false);
+  const [plyrInitError, setPlyrInitError] = useState("");
   const [youtubeNowPlayingTitle, setYoutubeNowPlayingTitle] = useState("");
   const [selfSyncingPlayback, setSelfSyncingPlayback] = useState(false);
   const [actionStates, setActionStates] = useState<Record<string, "loading" | "done">>({});
   const [hostTransferCandidateUserId, setHostTransferCandidateUserId] = useState("");
   const triedMkvFallbackRef = useRef<Record<string, boolean>>({});
-  const triedDriveVariantRef = useRef<Record<string, boolean>>({});
   const thumbCapturePlanRef = useRef<{ url: string; nextAt: number; step: number } | null>(null);
 
   const tokens = themeMode === "dark" ? darkTokens : lightTokens;
@@ -119,11 +126,9 @@ const App: React.FC = () => {
   const watchedUrlSet = useMemo(() => new Set(roomState.playlistHistoryUrls || []), [roomState.playlistHistoryUrls]);
   const visibleParticipants = participants.slice(0, 6);
   const hiddenParticipantsCount = Math.max(0, participants.length - visibleParticipants.length);
-  const activeMediaSource = (playbackMediaUrl || roomState.mediaUrl || "").trim();
+  const activeMediaSource = (playbackMediaUrl || roomState.resolvedMediaUrl || roomState.mediaUrl || "").trim();
   const youtubeVideoId = getYouTubeVideoId(activeMediaSource);
-  const drivePreviewUrl = getGoogleDrivePreviewUrl(activeMediaSource);
-  const isDriveIframeMode = !!drivePreviewUrl && driveIframeFallbackFor === activeMediaSource;
-  const isIframeMode = !!youtubeVideoId || isDriveIframeMode;
+  const isIframeMode = !!youtubeVideoId;
   const currentThumb = getRoomThumbnail(roomState.mediaUrl, mediaThumbCache);
   const isAmbilightAvailable = !isIframeMode;
   const isAmbilightActive = ambilightEnabled && isAmbilightAvailable;
@@ -137,7 +142,14 @@ const App: React.FC = () => {
   const hasLoadedSubtitle = !!subtitleTrackUrl || activeVideoTrackIndex >= 0;
   const nowPlayingName = youtubeVideoId
     ? getReadableRoomName(youtubeNowPlayingTitle || "YouTube video", "YouTube video")
-    : getReadableRoomName(getMediaDisplayName(activeMediaSource), "No media loaded");
+    : getReadableRoomName(getMediaDisplayName(roomState.mediaUrl || activeMediaSource), "No media loaded");
+  const playbackEngineLabel = youtubeVideoId
+    ? "YouTube iframe"
+    : plyrInitError
+      ? "Native fallback"
+    : plyrReady
+      ? (/\.m3u8(\?|$)/i.test(activeMediaSource) ? "Plyr + HLS" : "Plyr + HTML5")
+      : "Plyr init...";
   const canSubmitRoomModal = newRoomNameInput.trim().length > 3;
   const canSubmitJoinRoom = normalizeJoinTarget(joinRoomInput).length > 0;
   const isJoinModal = roomModalMode === "join";
@@ -378,41 +390,26 @@ const App: React.FC = () => {
   }, [videoError]);
 
   useEffect(() => {
-    setPlaybackMediaUrl((roomState.mediaUrl || "").trim());
-    triedMkvFallbackRef.current = {};
-    triedDriveVariantRef.current = {};
-    setDriveIframeFallbackFor("");
-  }, [roomState.mediaUrl]);
-
-  useEffect(() => {
-    if (!driveIframeFallbackFor) {
+    const pipelineStatus = (roomState.mediaPipelineStatus || "").trim().toLowerCase();
+    if (pipelineStatus === "pending") {
+      setStatus(roomState.mediaPipelineMessage || "Preparing media pipeline...");
       return;
     }
-    if (driveIframeFallbackFor !== activeMediaSource) {
-      setDriveIframeFallbackFor("");
+    if (pipelineStatus === "failed" && roomState.mediaPipelineMessage) {
+      setVideoError(roomState.mediaPipelineMessage);
     }
-  }, [driveIframeFallbackFor, activeMediaSource]);
+  }, [roomState.mediaPipelineStatus, roomState.mediaPipelineMessage]);
+
+  useEffect(() => {
+    setPlaybackMediaUrl((roomState.resolvedMediaUrl || roomState.mediaUrl || "").trim());
+    triedMkvFallbackRef.current = {};
+  }, [roomState.mediaUrl, roomState.resolvedMediaUrl]);
 
   useEffect(() => {
     if (!youtubeVideoId && youtubeNowPlayingTitle) {
       setYoutubeNowPlayingTitle("");
     }
   }, [youtubeVideoId, youtubeNowPlayingTitle]);
-
-  useEffect(() => {
-    if (!activeMediaSource || youtubeVideoId) {
-      return;
-    }
-    if (!getGoogleDrivePreviewUrl(activeMediaSource)) {
-      return;
-    }
-    if (driveIframeFallbackFor === activeMediaSource) {
-      return;
-    }
-    setDriveIframeFallbackFor(activeMediaSource);
-    setStatus("Google Drive links use iframe mode for compatibility.");
-    addDebug("video:drive:auto-iframe", { source: activeMediaSource });
-  }, [activeMediaSource, youtubeVideoId, driveIframeFallbackFor]);
 
   useEffect(() => {
     if (!isJoined || !(roomState.mediaUrl || "").trim()) {
@@ -427,11 +424,12 @@ const App: React.FC = () => {
   }, [isIframeMode, selfSyncingPlayback]);
 
   useEffect(() => {
-    let disposed = false;
     if (typeof window === "undefined") {
       return;
     }
     if (isIframeMode) {
+      setPlyrReady(false);
+      setPlyrInitError("");
       if (plyrRef.current) {
         plyrRef.current.destroy();
         plyrRef.current = null;
@@ -442,30 +440,162 @@ const App: React.FC = () => {
     if (!video || plyrRef.current) {
       return;
     }
-    const setup = async (): Promise<void> => {
-      const mod: any = await import("plyr");
-      if (disposed || isIframeMode || plyrRef.current || !videoRef.current) {
-        return;
+    const PlyrCtor: any = (PlyrModule as any).default ?? (PlyrModule as any);
+    try {
+      if (typeof PlyrCtor !== "function") {
+        throw new Error("Plyr constructor not available");
       }
-      const PlyrCtor = mod?.default ?? mod;
-      plyrRef.current = new PlyrCtor(videoRef.current, {
+      plyrRef.current = new PlyrCtor(video, {
         controls: ["play", "progress", "current-time", "duration", "mute", "volume", "settings", "fullscreen"],
-        settings: ["speed"],
+        settings: ["speed", "quality"],
+        quality: {
+          default: 0,
+          options: [0],
+          forced: true,
+          onChange: (value: number) => {
+            const hls = hlsRef.current;
+            if (!hls) {
+              return;
+            }
+            if (value === 0) {
+              hls.currentLevel = -1;
+              return;
+            }
+            const levelIndex = hls.levels.findIndex((level) => Number(level.height || 0) === value);
+            if (levelIndex >= 0) {
+              hls.currentLevel = levelIndex;
+            }
+          }
+        },
         speed: {
           selected: 1,
           options: [0.5, 0.75, 1, 1.25, 1.5, 2]
         }
       });
-    };
-    void setup();
+      setPlyrReady(true);
+      setPlyrInitError("");
+      addDebug("player:engine", { engine: "plyr", mode: "html5" });
+    } catch (error) {
+      setPlyrReady(false);
+      setPlyrInitError(String(error));
+      setVideoError(`Plyr initialization failed: ${String(error)}`);
+      addDebug("player:engine:error", { error: String(error) });
+    }
     return () => {
-      disposed = true;
+      setPlyrReady(false);
+      setPlyrInitError("");
+      if (hlsRef.current) {
+        hlsRef.current.destroy();
+        hlsRef.current = null;
+      }
       if (plyrRef.current) {
         plyrRef.current.destroy();
         plyrRef.current = null;
       }
     };
   }, [isIframeMode]);
+
+  useEffect(() => {
+    if (isIframeMode) {
+      return;
+    }
+    const video = videoRef.current;
+    if (!video) {
+      return;
+    }
+    const source = (playbackMediaUrl || roomState.resolvedMediaUrl || roomState.mediaUrl || "").trim();
+    const pipelineStatus = (roomState.mediaPipelineStatus || "").trim().toLowerCase();
+    if (pipelineStatus === "pending") {
+      if (hlsRef.current) {
+        hlsRef.current.destroy();
+        hlsRef.current = null;
+      }
+      if (video.getAttribute("src")) {
+        video.removeAttribute("src");
+        video.load();
+      }
+      return;
+    }
+    if (!source) {
+      if (hlsRef.current) {
+        hlsRef.current.destroy();
+        hlsRef.current = null;
+      }
+      if (video.getAttribute("src")) {
+        video.removeAttribute("src");
+        video.load();
+      }
+      return;
+    }
+
+    const isM3u8 = /\.m3u8(\?|$)/i.test(source);
+    if (isM3u8) {
+      if (hlsRef.current) {
+        hlsRef.current.destroy();
+        hlsRef.current = null;
+      }
+
+      if (Hls.isSupported()) {
+        const hls = new Hls({
+          enableWorker: true,
+          lowLatencyMode: false
+        });
+        hlsRef.current = hls;
+        hls.loadSource(source);
+        hls.attachMedia(video);
+        hls.on(Hls.Events.MANIFEST_PARSED, () => {
+          const player = plyrRef.current;
+          if (!player) {
+            return;
+          }
+          const heights = Array.from(new Set(hls.levels.map((level) => Number(level.height || 0)).filter((v) => v > 0)))
+            .sort((a, b) => b - a);
+          const options = [0, ...heights];
+          player.options.quality = {
+            default: 0,
+            options,
+            forced: true,
+            onChange: (value: number) => {
+              if (value === 0) {
+                hls.currentLevel = -1;
+                return;
+              }
+              const levelIndex = hls.levels.findIndex((level) => Number(level.height || 0) === value);
+              hls.currentLevel = levelIndex;
+            }
+          };
+        });
+        hls.on(Hls.Events.ERROR, (_event, data) => {
+          if (data?.fatal) {
+            setVideoError(`HLS error: ${data.details || "unknown_error"}`);
+          }
+        });
+        return () => {
+          hls.destroy();
+          if (hlsRef.current === hls) {
+            hlsRef.current = null;
+          }
+        };
+      }
+
+      if (video.canPlayType("application/vnd.apple.mpegurl")) {
+        video.src = source;
+        video.load();
+      } else {
+        setVideoError("HLS source is not supported in this browser.");
+      }
+      return;
+    }
+
+    if (hlsRef.current) {
+      hlsRef.current.destroy();
+      hlsRef.current = null;
+    }
+    if (video.src !== source) {
+      video.src = source;
+      video.load();
+    }
+  }, [isIframeMode, playbackMediaUrl, roomState.resolvedMediaUrl, roomState.mediaUrl, roomState.mediaPipelineStatus]);
 
   useEffect(() => {
     if (!subtitleTrackUrl) {
@@ -937,15 +1067,17 @@ const App: React.FC = () => {
       return;
     }
 
-    const activeMediaUrl = (playbackMediaUrl || state.mediaUrl || "").trim();
-    if (activeMediaUrl && video.src !== activeMediaUrl) {
-      suppressEvents.current = true;
+    const nextMediaUrl = (state.resolvedMediaUrl || state.mediaUrl || "").trim();
+    if (nextMediaUrl && nextMediaUrl !== playbackMediaUrl) {
+      setPlaybackMediaUrl(nextMediaUrl);
       setSelfSyncingPlayback(true);
-      video.src = activeMediaUrl;
-      video.load();
       setVideoError("");
-      addDebug("video:src:set", { src: activeMediaUrl, sourceMediaUrl: state.mediaUrl });
-      suppressEvents.current = false;
+      addDebug("video:source:set", {
+        playback: nextMediaUrl,
+        sourceMediaUrl: state.mediaUrl,
+        sourceType: state.mediaSourceType,
+        pipelineStatus: state.mediaPipelineStatus
+      });
     }
 
     const targetTime = expectedTime(state);
@@ -1000,8 +1132,7 @@ const App: React.FC = () => {
       setRoomState(state);
       setSelfSyncingPlayback(
         !!(state.mediaUrl || "").trim() &&
-        !getYouTubeVideoId(state.mediaUrl) &&
-        !getGoogleDrivePreviewUrl(state.mediaUrl)
+        !getYouTubeVideoId(state.mediaUrl)
       );
       setMediaUrlInput(state.mediaUrl || "");
       setView("room");
@@ -1408,7 +1539,7 @@ const App: React.FC = () => {
     }
     if (isIframeMode) {
       setStatus("Subtitle loading is available only for direct video playback, not iframe mode.");
-      subtitleDebug("load:blocked:iframe", { youtubeVideoId, drivePreviewUrl });
+      subtitleDebug("load:blocked:iframe", { youtubeVideoId });
       return;
     }
     setSubtitleBusy(true);
@@ -1510,45 +1641,6 @@ const App: React.FC = () => {
     } catch {
       setYoutubeNowPlayingTitle("YouTube video");
     }
-  };
-
-  const tryApplyDriveDirectVariant = (rawUrl: string): boolean => {
-    const sourceUrl = (rawUrl || "").trim();
-    if (!sourceUrl) {
-      return false;
-    }
-    const alternateUrl = toGoogleDriveAlternateDirectUrl(sourceUrl);
-    if (!alternateUrl || alternateUrl === sourceUrl) {
-      return false;
-    }
-    if (triedDriveVariantRef.current[sourceUrl]) {
-      return false;
-    }
-    triedDriveVariantRef.current[sourceUrl] = true;
-    setPlaybackMediaUrl(alternateUrl);
-    setStatus("Trying alternate Google Drive direct URL...");
-    addDebug("video:drive-direct-variant", { from: sourceUrl, to: alternateUrl });
-    return true;
-  };
-
-  const tryEnableDriveIframeFallback = (rawUrl: string): boolean => {
-    const sourceUrl = (rawUrl || "").trim();
-    if (!sourceUrl) {
-      return false;
-    }
-    if (getYouTubeVideoId(sourceUrl)) {
-      return false;
-    }
-    const preview = getGoogleDrivePreviewUrl(sourceUrl);
-    if (!preview) {
-      return false;
-    }
-    setDriveIframeFallbackFor(sourceUrl);
-    setVideoError("");
-    setShowVideoErrorModal(false);
-    setStatus("Direct playback failed. Switched to Google Drive iframe mode.");
-    addDebug("video:drive-iframe-fallback", { sourceUrl, preview });
-    return true;
   };
 
   const reportSyncStatus = async (ready: boolean, currentTimeSeconds = 0): Promise<void> => {
@@ -1955,12 +2047,6 @@ const App: React.FC = () => {
       const code = video.error?.code ?? -1;
       const msg = `Media error (code=${code}) src=${video.currentSrc || "-"}`;
       const sourceForHint = video.currentSrc || playbackMediaUrl || roomState.mediaUrl;
-      if (tryApplyDriveDirectVariant(sourceForHint)) {
-        return;
-      }
-      if (tryEnableDriveIframeFallback(sourceForHint)) {
-        return;
-      }
       const mkvHint = isLikelyMkvUrl(sourceForHint)
         ? `MKV failed in browser. ${getMkvFailureHint(sourceForHint)}`
         : "";
@@ -1974,9 +2060,6 @@ const App: React.FC = () => {
     const onLoadedMetadata = (): void => {
       if (video.videoWidth === 0 && video.videoHeight === 0 && video.duration > 0) {
         const sourceForHint = video.currentSrc || playbackMediaUrl || roomState.mediaUrl;
-        if (tryApplyDriveDirectVariant(sourceForHint)) {
-          return;
-        }
         const hint = `Video stream is not decodable in this browser (audio-only fallback). ${getMkvFailureHint(sourceForHint)}`;
         setVideoError(hint);
         setStatus("Video codec unsupported in browser.");
@@ -2004,9 +2087,6 @@ const App: React.FC = () => {
     const onLoadedData = (): void => {
       if (video.videoWidth === 0 && video.videoHeight === 0 && video.duration > 0) {
         const sourceForHint = video.currentSrc || playbackMediaUrl || roomState.mediaUrl;
-        if (tryApplyDriveDirectVariant(sourceForHint)) {
-          return;
-        }
         const hint = `Video stream is not decodable in this browser (audio-only fallback). ${getMkvFailureHint(sourceForHint)}`;
         setVideoError(hint);
         setStatus("Video codec unsupported in browser.");
@@ -2644,23 +2724,11 @@ const App: React.FC = () => {
             <div style={responsiveVideoFrameWrapStyle}>
               <div ref={ytContainerRef} style={styles.videoFrame} />
             </div>
-          ) : isDriveIframeMode && drivePreviewUrl ? (
-            <div style={responsiveVideoFrameWrapStyle}>
-              <iframe
-                src={drivePreviewUrl}
-                style={styles.videoFrame}
-                title="Google Drive player"
-                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen"
-                allowFullScreen
-                scrolling="no"
-                referrerPolicy="strict-origin-when-cross-origin"
-              />
-            </div>
           ) : (
             <video
               ref={videoRef}
               style={responsiveVideoStyle}
-              controls
+              controls={!!plyrInitError}
               onPlay={emitPlay}
               onPause={emitPause}
               onEnded={() => {
@@ -2982,6 +3050,17 @@ const App: React.FC = () => {
           <div style={responsiveNowPlayingWrapStyle} title={nowPlayingName}>
             <span style={styles.nowPlayingLabel}>Now Playing:</span>
             <span style={styles.nowPlayingValue}>{nowPlayingName}</span>
+            <span
+              style={{
+                ...styles.nowPlayingLabel,
+                marginLeft: 10,
+                opacity: 0.88,
+                fontWeight: 700
+              }}
+              title={plyrInitError || playbackEngineLabel}
+            >
+              Engine: {playbackEngineLabel}
+            </span>
           </div>
           <button
             style={{ ...themedIconButtonStyle, opacity: isAmbilightAvailable ? (ambilightEnabled ? 1 : 0.66) : 0.42, cursor: isAmbilightAvailable ? "pointer" : "not-allowed" }}
@@ -3476,22 +3555,6 @@ function getGoogleDriveFileId(url: string | undefined): string | undefined {
   return undefined;
 }
 
-function getGoogleDrivePreviewUrl(url: string | undefined): string | undefined {
-  const fileId = getGoogleDriveFileId(url);
-  if (!fileId) {
-    return undefined;
-  }
-  try {
-    const payload = JSON.stringify({ id: [fileId] });
-    const encoded = (typeof window !== "undefined" && typeof window.btoa === "function")
-      ? window.btoa(payload)
-      : btoa(payload);
-    return `https://sh20raj.github.io/DrivePlyr/plyr.html?id=${encodeURIComponent(encoded)}`;
-  } catch {
-    return `https://drive.google.com/file/d/${fileId}/preview`;
-  }
-}
-
 function toGoogleDriveDirectViewUrl(url: string): string {
   const raw = (url || "").trim();
   if (!raw) {
@@ -3513,58 +3576,6 @@ function toGoogleDriveDirectViewUrl(url: string): string {
     return direct.toString();
   } catch {
     return raw;
-  }
-}
-
-function toGoogleDriveDirectDownloadUrl(url: string): string {
-  const raw = (url || "").trim();
-  if (!raw) {
-    return raw;
-  }
-  const fileId = getGoogleDriveFileId(raw);
-  if (!fileId) {
-    return raw;
-  }
-  try {
-    const parsed = new URL(raw);
-    const direct = new URL("https://drive.usercontent.google.com/download");
-    direct.searchParams.set("export", "download");
-    direct.searchParams.set("confirm", "t");
-    direct.searchParams.set("id", fileId);
-    const resourceKey = (parsed.searchParams.get("resourcekey") || "").trim();
-    if (resourceKey) {
-      direct.searchParams.set("resourcekey", resourceKey);
-    }
-    return direct.toString();
-  } catch {
-    return raw;
-  }
-}
-
-function toGoogleDriveAlternateDirectUrl(url: string): string | undefined {
-  const raw = (url || "").trim();
-  if (!raw) {
-    return undefined;
-  }
-  const fileId = getGoogleDriveFileId(raw);
-  if (!fileId) {
-    return undefined;
-  }
-  try {
-    const parsed = new URL(raw);
-    const host = parsed.hostname.toLowerCase();
-    const isUcView = (host === "drive.google.com" || host.endsWith(".drive.google.com"))
-      && parsed.pathname === "/uc";
-    const isUsercontentDownload = host === "drive.usercontent.google.com" && parsed.pathname === "/download";
-    if (isUcView) {
-      return toGoogleDriveDirectDownloadUrl(raw);
-    }
-    if (isUsercontentDownload) {
-      return toGoogleDriveDirectViewUrl(raw);
-    }
-    return toGoogleDriveDirectDownloadUrl(raw);
-  } catch {
-    return undefined;
   }
 }
 

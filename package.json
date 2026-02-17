@@ -13,12 +13,17 @@
   },
   "devDependencies": {
     "@rootsdk/dev-tools": "*",
+    "@playwright/test": "^1.50.1",
     "typescript": "^5.8.2",
     "@types/node": "^22.10.2"
   },
   "scripts": {
     "build": "npm run build --workspaces",
-    "clean": "node clean.js"
+    "clean": "node clean.js",
+    "test:fixtures": "node tests/scripts/generate-fixtures.mjs",
+    "test:player:api": "node tests/api/player-tests.mjs",
+    "test:player:e2e": "playwright test --reporter=line",
+    "test:player": "node tests/scripts/run-player-tests.mjs"
   },
   "workspaces": {
     "packages": [

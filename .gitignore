@@ -1,0 +1,8 @@
+node_modules/
+client/dist/
+server/dist/
+networking/gen/**/dist/
+tests/artifacts/
+test-results/
+.cinelink-media/
+playwright-report/

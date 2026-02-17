@@ -104,6 +104,22 @@ export interface RoomState {
      * @generated from protobuf field: repeated string sync_ready_user_ids = 24
      */
     syncReadyUserIds: string[];
+    /**
+     * @generated from protobuf field: string media_source_type = 25
+     */
+    mediaSourceType: string;
+    /**
+     * @generated from protobuf field: string resolved_media_url = 26
+     */
+    resolvedMediaUrl: string;
+    /**
+     * @generated from protobuf field: string media_pipeline_status = 27
+     */
+    mediaPipelineStatus: string;
+    /**
+     * @generated from protobuf field: string media_pipeline_message = 28
+     */
+    mediaPipelineMessage: string;
 }
 /**
  * @generated from protobuf message GetRoomStateRequest
