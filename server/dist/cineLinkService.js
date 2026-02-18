@@ -10,6 +10,8 @@ const adm_zip_1 = __importDefault(require("adm-zip"));
 const mediaPipeline_1 = require("./mediaPipeline");
 const testDiagnostics_1 = require("./testDiagnostics");
 const DEFAULT_RATE = 1;
+const MEDIA_REMAP_HOSTS = parseHostListEnv("CINELINK_MEDIA_REMAP_HOSTS", ["archive.org"]);
+const MEDIA_METADATA_FALLBACK_HOSTS = parseHostListEnv("CINELINK_MEDIA_METADATA_FALLBACK_HOSTS", ["archive.org"]);
 class CineLinkService extends gen_server_1.CineLinkServiceBase {
     constructor() {
         super(...arguments);
@@ -888,7 +890,22 @@ class CineLinkService extends gen_server_1.CineLinkServiceBase {
                 previousPipelineStatus !== "" ||
                 previousPipelineMessage !== "");
         }
-        const resolved = await (0, mediaPipeline_1.resolvePlaybackSource)(mediaUrl);
+        let resolved = await (0, mediaPipeline_1.resolvePlaybackSource)(mediaUrl);
+        if (resolved.pipelineStatus === "failed"
+            && isLikelyMkvUrl(mediaUrl)
+            && isMetadataFallbackHostUrl(mediaUrl)) {
+            const fallbackUrl = await resolveArchivePreferredPlayableUrl(mediaUrl, { forceBestCandidate: true });
+            if (fallbackUrl && fallbackUrl !== mediaUrl) {
+                serverLog("media:archive:compat-fallback", {
+                    roomId: state.roomId,
+                    from: mediaUrl,
+                    to: fallbackUrl,
+                    reason: resolved.pipelineMessage
+                });
+                state.mediaUrl = fallbackUrl;
+                resolved = await (0, mediaPipeline_1.resolvePlaybackSource)(fallbackUrl);
+            }
+        }
         state.mediaSourceType = resolved.sourceType;
         state.resolvedMediaUrl = resolved.resolvedUrl;
         state.mediaPipelineStatus = resolved.pipelineStatus;
@@ -1063,7 +1080,7 @@ async function resolvePlayableMediaInputBundle(value) {
         sourceName: parsedFolder.folderName
     };
 }
-async function resolveArchivePreferredPlayableUrl(urlValue) {
+async function resolveArchivePreferredPlayableUrl(urlValue, options) {
     const raw = (urlValue || "").trim();
     if (!raw) {
         return urlValue;
@@ -1076,7 +1093,7 @@ async function resolveArchivePreferredPlayableUrl(urlValue) {
         return urlValue;
     }
     const host = parsed.hostname.toLowerCase();
-    const isArchiveHost = host === "archive.org" || host.endsWith(".archive.org");
+    const isArchiveHost = isHostListed(host, MEDIA_METADATA_FALLBACK_HOSTS);
     if (!isArchiveHost) {
         return urlValue;
     }
@@ -1097,11 +1114,12 @@ async function resolveArchivePreferredPlayableUrl(urlValue) {
     const directLooksLikeDubCompanion = looksLikeArchiveDubCompanion(directFileLower);
     // If the user provided a concrete archive file path, preserve it by default.
     // We only auto-pick another candidate for known problematic companion/dub paths.
-    if (directFilePath && !directLooksLikeDubCompanion) {
+    if (directFilePath && !directLooksLikeDubCompanion && !options?.forceBestCandidate) {
         return urlValue;
     }
     try {
-        const metadataResp = await fetch(`https://archive.org/metadata/${encodeURIComponent(identifier)}`, {
+        const metadataBase = `https://${host}`;
+        const metadataResp = await fetch(`${metadataBase}/metadata/${encodeURIComponent(identifier)}`, {
             headers: { "User-Agent": "CineLink/1.0 archive-mkv-fallback" }
         });
         if (!metadataResp.ok) {
@@ -1153,14 +1171,9 @@ async function resolveArchivePreferredPlayableUrl(urlValue) {
             else if (format.includes("matroska")) {
                 score += 5;
             }
-            // Prefer full episode files over tiny dubbed-audio companions.
+            // Prefer full episode files over companion/extras audio variants.
             score += Math.min(320, Math.round(sizeMb / 2));
-            if (name.includes("/rus sound/") || name.includes("\\rus sound\\")) {
-                score -= 420;
-            }
-            if (name.includes("[anidub]") || name.includes("[get smart]") || name.includes("[mca]") || name.includes("[св-дубль]")) {
-                score -= 160;
-            }
+            score -= archiveCompanionPenalty(name);
             if (preferredEpisode !== null) {
                 const episodeRe = new RegExp(`\\)\\s*0?${preferredEpisode}\\s*\\[`);
                 if (episodeRe.test(name)) {
@@ -1187,7 +1200,7 @@ async function resolveArchivePreferredPlayableUrl(urlValue) {
             .filter(Boolean)
             .map((segment) => encodeURIComponent(segment))
             .join("/");
-        const resolved = `https://archive.org/download/${encodeURIComponent(identifier)}/${picked}`;
+        const resolved = `https://${host}/download/${encodeURIComponent(identifier)}/${picked}`;
         if (resolved !== raw) {
             serverLog("media:archive:fallback-picked", { identifier, from: raw, to: resolved });
         }
@@ -1215,12 +1228,62 @@ function decodeArchivePath(value) {
         .join("/");
 }
 function looksLikeArchiveDubCompanion(lowerPath) {
-    return (lowerPath.includes("/rus sound/")
-        || lowerPath.includes("\\rus sound\\")
-        || lowerPath.includes("[anidub]")
-        || lowerPath.includes("[get smart]")
-        || lowerPath.includes("[mca]")
-        || lowerPath.includes("[св-дубль]"));
+    return archiveCompanionPenalty(lowerPath) >= 180;
+}
+function archiveCompanionPenalty(lowerPath) {
+    const normalized = normalizeArchiveCompanionText(lowerPath);
+    if (!normalized) {
+        return 0;
+    }
+    const strongSignals = [
+        /\brus sound\b/i,
+        /\bcommentary\b/i,
+        /\bsoundtrack\b/i,
+        /\bvoice\s*over\b/i,
+        /\bdub(?:bed|lagem|lado)?\b/i,
+        /\bdual\s*audio\b/i,
+        /\bmulti\s*audio\b/i,
+        /\bextras?\b/i,
+        /\bbonus\b/i,
+        /\btrailer\b/i,
+        /\bsample\b/i,
+        /\bteaser\b/i,
+        /\bost\b/i,
+        /\bncop\b/i,
+        /\bnced\b/i
+    ];
+    const weakSignals = [
+        /\baudio\b/i,
+        /\bvoice\b/i,
+        /\bop(?:ening)?\b/i,
+        /\bed(?:ending)?\b/i,
+        /\bpromo\b/i
+    ];
+    let penalty = 0;
+    for (const pattern of strongSignals) {
+        if (pattern.test(normalized)) {
+            penalty += 220;
+        }
+    }
+    for (const pattern of weakSignals) {
+        if (pattern.test(normalized)) {
+            penalty += 70;
+        }
+    }
+    const hasLanguageHint = /\b(rus|ru|eng|en|ptbr|pt br|por|es|spa|lat|jpn|jp|ita|ger|deu)\b/i.test(normalized);
+    const hasDubAudioHint = /\b(audio|dub|dublagem|dual audio|multi audio|voice over|commentary)\b/i.test(normalized);
+    if (hasLanguageHint && hasDubAudioHint) {
+        penalty += 140;
+    }
+    return Math.min(760, penalty);
+}
+function normalizeArchiveCompanionText(value) {
+    return (value || "")
+        .toLowerCase()
+        .replace(/%20/g, " ")
+        .replace(/[\\/_\-\[\]\(\)\.]+/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
 }
 function extractPreferredEpisodeFromPath(pathValue) {
     const value = (pathValue || "").trim();
@@ -1835,14 +1898,47 @@ function sanitizeDriveFileId(value) {
 }
 function toArchiveDirectMediaUrl(url) {
     const hostname = url.hostname.toLowerCase();
-    const isArchiveHost = hostname === "archive.org" || hostname.endsWith(".archive.org");
+    const isArchiveHost = isHostListed(hostname, MEDIA_REMAP_HOSTS);
     if (!isArchiveHost) {
         return undefined;
     }
     if (url.pathname.startsWith("/details/")) {
-        return `https://archive.org${url.pathname.replace("/details/", "/download/")}`;
+        return `${url.protocol}//${url.host}${url.pathname.replace("/details/", "/download/")}`;
     }
     return undefined;
+}
+function isMetadataFallbackHostUrl(urlValue) {
+    try {
+        const parsed = new URL(urlValue);
+        const host = parsed.hostname.toLowerCase();
+        return isHostListed(host, MEDIA_METADATA_FALLBACK_HOSTS);
+    }
+    catch {
+        return false;
+    }
+}
+function parseHostListEnv(envName, defaults) {
+    const raw = (process.env[envName] || "").trim();
+    if (!raw) {
+        return defaults.map((h) => h.toLowerCase());
+    }
+    const list = raw
+        .split(",")
+        .map((h) => h.trim().toLowerCase())
+        .filter(Boolean);
+    return list.length ? list : defaults.map((h) => h.toLowerCase());
+}
+function isHostListed(host, entries) {
+    const normalized = (host || "").toLowerCase();
+    return entries.some((entry) => normalized === entry || normalized.endsWith(`.${entry}`));
+}
+function isLikelyMkvUrl(urlValue) {
+    try {
+        return new URL(urlValue).pathname.toLowerCase().endsWith(".mkv");
+    }
+    catch {
+        return /\.mkv(\?|$)/i.test(urlValue || "");
+    }
 }
 function clamp(value, min, max) {
     if (Number.isNaN(value)) {

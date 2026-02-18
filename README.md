@@ -1,57 +1,68 @@
 # CineLink
 
-Plataforma de watch party para assistir em sala com sincronização de playback, playlist compartilhada, controle de host, subtítulos e interface glass (dark/light).
+CineLink is a watch party platform for synchronized playback, shared queue, host control, subtitles, and a glass-style UI (dark/light).
 
-![CineLink Hero](docs/images/cinelink-hero.png)
+## Overview
 
-![CineLink Logo](docs/images/cinelink-logo-glow.png)
+This repository is a monorepo with:
 
-## Visao geral
+- `client/`: React + Vite app
+- `server/`: RootSDK service
+- `networking/`: generated shared/client/server contracts
 
-O CineLink permite criar salas, entrar por link/codigo, compartilhar midias e assistir junto em tempo real.  
-O projeto esta organizado como monorepo com `client`, `server` e contratos gerados em `networking`.
+## Features
 
-## Principais recursos
+- Room create/join flow
+- Shared playback sync (`play`, `pause`, `seek`, `rate`)
+- Shared playlist with next/previous/history
+- Media input support:
+  - direct URLs (`mp4`, `webm`, `mov`, `m4v`, `mkv`)
+  - Archive.org links
+  - Google Drive links (proxied by server)
+  - YouTube links (via Plyr provider)
+- Subtitles:
+  - search and load in popup
+  - local upload (`.srt`, `.vtt`) per user
+  - local timing offset (`-0.1`, `-1`, `+0.1`, `+1`, reset)
+  - embedded track selection when browser exposes tracks
+- Audio track selection (when available)
+- Responsive UI for desktop/mobile
 
-- Salas com criacao/entrada rapida
-- Sincronizacao de `play/pause/seek/rate` entre participantes
-- Playlist compartilhada com avancar/anterior e historico
-- Integracao com:
-  - links diretos (`mp4/webm/mov/m4v`)
-  - Archive.org
-  - Google Drive (fallback por iframe para compatibilidade)
-  - YouTube (video/playlist)
-- Subtitulos:
-  - busca e carga por popup
-  - upload local (`.srt/.vtt`) por usuario
-  - ajuste de tempo (`-0.1`, `-1`, `+0.1`, `+1`, reset)
-  - selecao de faixas embutidas quando expostas pelo browser
-- Tema dark/light com visual liquid glass
-- Layout responsivo para mobile
+## Player stack
 
-## Estrutura do projeto
+- Universal player UI is based on **Plyr**.
+- HLS playback is supported via **hls.js** when source is `.m3u8`.
+- Current default mode is **lightweight**: server-side transcode is disabled unless explicitly enabled.
 
-```text
-.
-├─ client/       # App React + Vite
-├─ server/       # Servico CineLink (RootSDK)
-├─ networking/   # Contratos/protocolos gerados
-├─ package.json  # Workspaces
-└─ clean.js
+## Server-side transcode mode (optional)
+
+By default, MKV->HLS transcode is disabled.
+
+- Default: disabled (`CINELINK_ENABLE_TRANSCODE` not set)
+- Enable explicitly:
+
+```powershell
+$env:CINELINK_ENABLE_TRANSCODE='true'
 ```
 
-## Requisitos
+If you enable transcode, make sure `ffmpeg` is available in `PATH` or set:
 
-- Node.js `>= 22`
-- npm `>= 10`
+```powershell
+$env:CINELINK_FFMPEG_PATH='C:\path\to\ffmpeg.exe'
+```
 
-## Instalacao
+## Requirements
+
+- Node.js `>=22`
+- npm `>=10`
+
+## Install
 
 ```bash
 npm install
 ```
 
-## Como rodar (dev)
+## Run (dev)
 
 Terminal 1 (server):
 
@@ -67,64 +78,73 @@ npm run client --workspace @cinelink/client
 
 ## Build
 
-Build completo:
+Full build:
 
 ```bash
 npm run build
 ```
 
-Build por workspace:
+Per workspace:
 
 ```bash
 npm run build --workspace @cinelink/server
 npm run build --workspace @cinelink/client
 ```
 
-## Portas usadas
+## Test commands
+
+Generate fixtures:
+
+```bash
+npm run test:fixtures
+```
+
+Player API tests:
+
+```bash
+npm run test:player:api
+```
+
+Real links smoke test:
+
+```bash
+npm run test:player:links
+```
+
+Playwright E2E:
+
+```bash
+npm run test:player:e2e
+```
+
+All player tests:
+
+```bash
+npm run test:player
+```
+
+## Ports
 
 - `8080` ClientMessage WS
 - `8082` ClientUpdate WS
 - `8081` OutOfBandServices
 - `8090` DevAppHostService
+- `8099` Media HTTP (proxy/pipeline endpoints)
 
-Se receber `EADDRINUSE`, finalize processos antigos antes de subir novamente.
+If you get `EADDRINUSE`, kill old listeners.
 
-PowerShell:
+PowerShell helper:
 
 ```powershell
-$ports = 8080,8082,8081,8090
+$ports = 8080,8082,8081,8090,8099
 $pids = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
   Where-Object { $ports -contains $_.LocalPort } |
   Select-Object -ExpandProperty OwningProcess -Unique
 if ($pids) { $pids | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue } }
 ```
 
-## Fluxo rapido de uso
+## Notes
 
-1. Criar sala no Lobby
-2. Definir URL de midia
-3. Compartilhar link da sala
-4. Controlar playback (host)
-5. Gerenciar playlist e subtitulos conforme necessario
-
-## Notas de compatibilidade
-
-- Alguns MKVs podem nao decodificar no browser (codec/container).  
-  Quando isso ocorre, o app aplica fallback para manter reproduzibilidade.
-- Google Drive pode exigir modo iframe para reproduzir de forma confiavel.
-- Se um recurso nao abrir diretamente, valide:
-  - acesso publico do arquivo
-  - CORS/range requests
-  - codec suportado no navegador
-
-## Imagens do README
-
-As imagens acima devem estar em:
-
-- `docs/images/cinelink-hero.png`
-- `docs/images/cinelink-logo-glow.png`
-
-## Licenca
-
-Definir a licenca oficial do projeto (ex.: MIT) quando publicar.
-
+- Browser codec support varies by platform/browser.
+- Some MKV files can play directly in one browser and fail in another.
+- Drive links must be publicly accessible to be playable.

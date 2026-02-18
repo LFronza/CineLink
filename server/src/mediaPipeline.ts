@@ -24,6 +24,8 @@ type HlsJobStatus = {
   outputDir: string;
   updatedAtMs: number;
   assignedWorkerUserId?: string;
+  videoMapSpecifier?: string;
+  audioMapSpecifier?: string;
 };
 
 type TestHooks = {
@@ -52,6 +54,7 @@ type TestHooks = {
 const MEDIA_HTTP_PORT = Number(process.env.CINELINK_MEDIA_PORT || 8099);
 const FFMPEG_BIN = (process.env.CINELINK_FFMPEG_PATH || "ffmpeg").trim() || "ffmpeg";
 const FFPROBE_BIN = (process.env.CINELINK_FFPROBE_PATH || "").trim();
+const TRANSCODE_ENABLED = String(process.env.CINELINK_ENABLE_TRANSCODE || "").trim().toLowerCase() === "true";
 const MEDIA_RUNTIME_DIR = path.resolve(process.cwd(), ".cinelink-media");
 const MEDIA_HLS_DIR = path.join(MEDIA_RUNTIME_DIR, "hls");
 const HLS_TTL_MS = 1000 * 60 * 60 * 6;
@@ -60,6 +63,8 @@ const FAILED_RETRY_AFTER_MS = 1000 * 60 * 2;
 
 const hlsJobs = new Map<string, HlsJobStatus>();
 const workerBusyCount = new Map<string, number>();
+const driveProbeCache = new Map<string, { kind: "mkv" | "unknown"; ts: number }>();
+const DRIVE_PROBE_TTL_MS = 1000 * 60 * 5;
 let mediaServerStarted = false;
 let cleanupTimer: NodeJS.Timeout | null = null;
 let ffmpegAvailableCache: boolean | null = null;
@@ -124,6 +129,9 @@ type PrewarmOptions = {
 };
 
 export async function prewarmTranscodes(urls: string[], options?: PrewarmOptions): Promise<void> {
+  if (!TRANSCODE_ENABLED) {
+    return;
+  }
   const uniqueUrls = Array.from(new Set((urls || []).map((value) => (value || "").trim()).filter(Boolean)));
   if (!uniqueUrls.length) {
     return;
@@ -162,6 +170,9 @@ export async function prewarmTranscodes(urls: string[], options?: PrewarmOptions
 }
 
 export async function releaseTranscodesForUrls(urls: string[], reason = "manual-release"): Promise<void> {
+  if (!TRANSCODE_ENABLED) {
+    return;
+  }
   const uniqueUrls = Array.from(new Set((urls || []).map((value) => (value || "").trim()).filter(Boolean)));
   for (const mediaUrl of uniqueUrls) {
     if (!isLikelyMkvUrl(mediaUrl)) {
@@ -240,14 +251,38 @@ async function resolvePlaybackSourceInternal(
     };
   }
   if (isGoogleDriveUrl(sourceUrl)) {
+    const proxyUrl = `${getMediaBaseUrl()}/media/drive?url=${encodeURIComponent(sourceUrl)}`;
+    if (!TRANSCODE_ENABLED) {
+      addTestLog("media:resolve:transcode-disabled", { sourceType: "drive", mediaUrl: sourceUrl });
+      return {
+        sourceType: "drive",
+        resolvedUrl: proxyUrl,
+        pipelineStatus: "ready",
+        pipelineMessage: ""
+      };
+    }
+    const driveKind = await detectDriveContainerKind(sourceUrl);
+    if (driveKind === "mkv") {
+      addTestLog("media:drive:detected-mkv", { mediaUrl: sourceUrl, proxyUrl });
+      return ensureHlsFromMkv(proxyUrl, options);
+    }
     return {
       sourceType: "drive",
-      resolvedUrl: `${getMediaBaseUrl()}/media/drive?url=${encodeURIComponent(sourceUrl)}`,
+      resolvedUrl: proxyUrl,
       pipelineStatus: "ready",
       pipelineMessage: ""
     };
   }
   if (isLikelyMkvUrl(sourceUrl)) {
+    if (!TRANSCODE_ENABLED) {
+      addTestLog("media:resolve:transcode-disabled", { sourceType: "mkv", mediaUrl: sourceUrl });
+      return {
+        sourceType: "html5",
+        resolvedUrl: sourceUrl,
+        pipelineStatus: "ready",
+        pipelineMessage: ""
+      };
+    }
     return ensureHlsFromMkv(sourceUrl, options);
   }
   return {
@@ -410,6 +445,13 @@ async function ensureHlsFromMkv(
 async function startTranscodeJob(job: HlsJobStatus): Promise<void> {
   await ensureRuntimeDirs();
   await fs.mkdir(job.outputDir, { recursive: true });
+  const streamMaps = await probePreferredStreamMaps(job.inputUrl);
+  if (streamMaps.videoMapSpecifier) {
+    job.videoMapSpecifier = streamMaps.videoMapSpecifier;
+  }
+  if (streamMaps.audioMapSpecifier) {
+    job.audioMapSpecifier = streamMaps.audioMapSpecifier;
+  }
   const hasVideo = await probeInputHasVideo(job.inputUrl);
   if (hasVideo === false) {
     job.status = "failed";
@@ -552,17 +594,23 @@ async function transcodeHlsVariant(
   stageName: string
 ): Promise<{ ok: boolean; message?: string }> {
   const variantPlaylistPath = getVariantPlaylistPath(job.outputDir, height);
-  const args = [
+  const baseArgs = [
     "-hide_banner",
     "-y",
     "-i",
-    job.inputUrl,
+    job.inputUrl
+  ];
+  const mapVideo = job.videoMapSpecifier || "0:v:0?";
+  const mapAudio = job.audioMapSpecifier || "0:a:0?";
+  const transcodeCore = [
     "-map",
-    "0:v:0?",
+    mapVideo,
     "-map",
-    "0:a:0?",
+    mapAudio,
+    "-sn",
+    "-dn",
     "-vf",
-    `scale=w=-2:h=${height}:force_original_aspect_ratio=decrease`,
+    `scale=-2:${height},format=yuv420p`,
     "-c:v",
     "libx264",
     "-preset",
@@ -583,9 +631,9 @@ async function transcodeHlsVariant(
     getVariantSegmentPattern(job.outputDir, height),
     variantPlaylistPath
   ];
-
-  const result = await new Promise<{ ok: boolean; message?: string }>((resolve) => {
-    const child = spawn(ffmpegResolvedBin, args, { stdio: ["ignore", "ignore", "pipe"] });
+  const args = [...baseArgs, ...transcodeCore];
+  const runFfmpeg = (ffArgs: string[]) => new Promise<{ ok: boolean; message?: string }>((resolve) => {
+    const child = spawn(ffmpegResolvedBin, ffArgs, { stdio: ["ignore", "ignore", "pipe"] });
     let stderrTail = "";
     let lastProgressBucket = -1;
     child.stderr.on("data", (chunk) => {
@@ -616,7 +664,7 @@ async function transcodeHlsVariant(
           .split("\n")
           .map((line) => line.trim())
           .filter(Boolean)
-          .slice(-6)
+          .slice(-12)
           .join(" | ");
         resolve({
           ok: false,
@@ -628,6 +676,36 @@ async function transcodeHlsVariant(
       resolve(exists ? { ok: true } : { ok: false, message: `Missing variant playlist (${stageName}).` });
     });
   });
+  let result = await runFfmpeg(args);
+  if (!result.ok) {
+    const retryArgs = [
+      ...baseArgs,
+      "-map",
+      mapVideo,
+      "-sn",
+      "-dn",
+      "-an",
+      "-vf",
+      `scale=-2:${height},format=yuv420p`,
+      "-c:v",
+      "libx264",
+      "-preset",
+      "veryfast",
+      "-crf",
+      "22",
+      "-f",
+      "hls",
+      "-hls_time",
+      "6",
+      "-hls_playlist_type",
+      "vod",
+      "-hls_segment_filename",
+      getVariantSegmentPattern(job.outputDir, height),
+      variantPlaylistPath
+    ];
+    addTestLog("media:transcode:retry-video-only", { key: job.key, stage: stageName, height, mapVideo });
+    result = await runFfmpeg(retryArgs);
+  }
   return result;
 }
 
@@ -797,6 +875,42 @@ async function probeInputVideoHeight(inputUrl: string): Promise<number | null> {
       const out = Buffer.concat(chunks).toString("utf-8").trim();
       const value = Number(out);
       resolve(Number.isFinite(value) && value > 0 ? value : null);
+    });
+  });
+}
+
+async function probePreferredStreamMaps(inputUrl: string): Promise<{ videoMapSpecifier?: string; audioMapSpecifier?: string }> {
+  return await new Promise<{ videoMapSpecifier?: string; audioMapSpecifier?: string }>((resolve) => {
+    const args = ["-v", "error", "-show_streams", "-of", "json", inputUrl];
+    const child = spawn(ffprobeResolvedBin, args, { stdio: ["ignore", "pipe", "ignore"] });
+    const chunks: Buffer[] = [];
+    child.stdout.on("data", (chunk) => {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+    });
+    child.on("error", () => resolve({}));
+    child.on("close", (code) => {
+      if (code !== 0) {
+        resolve({});
+        return;
+      }
+      try {
+        const json = JSON.parse(Buffer.concat(chunks).toString("utf-8")) as {
+          streams?: Array<{ codec_type?: string; index?: number; disposition?: { attached_pic?: number } }>;
+        };
+        const streams = Array.isArray(json.streams) ? json.streams : [];
+        const videoStream = streams.find((s) => s.codec_type === "video" && Number(s.disposition?.attached_pic || 0) !== 1);
+        const audioStream = streams.find((s) => s.codec_type === "audio");
+        const out: { videoMapSpecifier?: string; audioMapSpecifier?: string } = {};
+        if (Number.isInteger(videoStream?.index)) {
+          out.videoMapSpecifier = `0:${Number(videoStream!.index)}`;
+        }
+        if (Number.isInteger(audioStream?.index)) {
+          out.audioMapSpecifier = `0:${Number(audioStream!.index)}?`;
+        }
+        resolve(out);
+      } catch {
+        resolve({});
+      }
     });
   });
 }
@@ -1169,6 +1283,27 @@ function extractDriveFollowUpUrls(baseUrl: string, htmlBody: string): string[] {
   const decoded = decodeHtmlEntities(htmlBody || "");
   const base = safeUrl(baseUrl);
 
+  const formAction = decoded.match(/<form[^>]*id=["']download-form["'][^>]*action=["']([^"']+)["']/i)?.[1] || "";
+  if (formAction) {
+    const actionUrl = toAbsoluteUrl(base, formAction);
+    if (actionUrl) {
+      try {
+        const follow = new URL(actionUrl);
+        const hiddenInputs = [...decoded.matchAll(/<input[^>]*type=["']hidden["'][^>]*name=["']([^"']+)["'][^>]*value=["']([^"']*)["']/gi)];
+        for (const match of hiddenInputs) {
+          const key = (match[1] || "").trim();
+          const value = (match[2] || "").trim();
+          if (key) {
+            follow.searchParams.set(key, value);
+          }
+        }
+        out.push(follow.toString());
+      } catch {
+        // ignore invalid form action
+      }
+    }
+  }
+
   const hrefRegex = /href=(["'])(.*?)\1/gi;
   let hrefMatch: RegExpExecArray | null = null;
   while ((hrefMatch = hrefRegex.exec(decoded)) !== null) {
@@ -1256,6 +1391,37 @@ function extractDriveFileId(urlValue: string): string | undefined {
 
 function uniqueStrings(values: string[]): string[] {
   return Array.from(new Set(values.filter((value) => !!value)));
+}
+
+async function detectDriveContainerKind(urlValue: string): Promise<"mkv" | "unknown"> {
+  const key = (urlValue || "").trim();
+  if (!key) {
+    return "unknown";
+  }
+  const cached = driveProbeCache.get(key);
+  if (cached && (Date.now() - cached.ts) < DRIVE_PROBE_TTL_MS) {
+    return cached.kind;
+  }
+  try {
+    const response = await fetchBestDriveResponse(key, "GET", "bytes=0-4095");
+    if (!response?.ok) {
+      driveProbeCache.set(key, { kind: "unknown", ts: Date.now() });
+      return "unknown";
+    }
+    const bytes = Buffer.from(await response.arrayBuffer());
+    // Matroska/WEBM EBML header
+    const isMkv = bytes.length >= 4
+      && bytes[0] === 0x1a
+      && bytes[1] === 0x45
+      && bytes[2] === 0xdf
+      && bytes[3] === 0xa3;
+    const kind: "mkv" | "unknown" = isMkv ? "mkv" : "unknown";
+    driveProbeCache.set(key, { kind, ts: Date.now() });
+    return kind;
+  } catch {
+    driveProbeCache.set(key, { kind: "unknown", ts: Date.now() });
+    return "unknown";
+  }
 }
 
 async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {

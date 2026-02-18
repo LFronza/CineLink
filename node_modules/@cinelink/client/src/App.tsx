@@ -110,15 +110,17 @@ const App: React.FC = () => {
   const [activeVideoAudioTrackIndex, setActiveVideoAudioTrackIndex] = useState(-1);
   const [playbackMediaUrl, setPlaybackMediaUrl] = useState("");
   const [plyrReady, setPlyrReady] = useState(false);
-  const [plyrInitError, setPlyrInitError] = useState("");
   const [youtubeNowPlayingTitle, setYoutubeNowPlayingTitle] = useState("");
   const [selfSyncingPlayback, setSelfSyncingPlayback] = useState(false);
   const [mediaLoading, setMediaLoading] = useState(false);
   const [mediaLoadingPercent, setMediaLoadingPercent] = useState<number | null>(null);
+  const [mediaLoadingStagePercent, setMediaLoadingStagePercent] = useState<number | null>(null);
+  const [videoRatioCss, setVideoRatioCss] = useState("16 / 9");
   const [actionStates, setActionStates] = useState<Record<string, "loading" | "done">>({});
   const [hostTransferCandidateUserId, setHostTransferCandidateUserId] = useState("");
   const triedMkvFallbackRef = useRef<Record<string, boolean>>({});
   const thumbCapturePlanRef = useRef<{ url: string; nextAt: number; step: number } | null>(null);
+  const lastMediaProgressRef = useRef<number>(-1);
 
   const tokens = themeMode === "dark" ? darkTokens : lightTokens;
   const isMobile = viewportWidth <= 768;
@@ -145,19 +147,11 @@ const App: React.FC = () => {
   const canClaimHost = isJoined && !isHost && !hasPendingClaim;
   const canOpenMediaPopup = isJoined && (isHost || roomState.allowViewerQueueAdd);
   const canOpenSubtitlePopup = isJoined && !isIframeMode;
-  const hasSelectableAudioTracks = videoAudioTracks.length > 1;
-  const canOpenAudioPopup = isJoined && !isIframeMode && hasSelectableAudioTracks;
+  const canOpenAudioPopup = isJoined && !isIframeMode;
   const hasLoadedSubtitle = !!subtitleTrackUrl || activeVideoTrackIndex >= 0;
   const nowPlayingName = youtubeVideoId
     ? getReadableRoomName(youtubeNowPlayingTitle || "YouTube video", "YouTube video")
     : getReadableRoomName(getMediaDisplayName(roomState.mediaUrl || activeMediaSource), "No media loaded");
-  const playbackEngineLabel = youtubeVideoId
-    ? (plyrReady ? "Plyr + YouTube" : "Plyr init...")
-    : plyrInitError
-      ? "Native fallback"
-    : plyrReady
-      ? (/\.m3u8(\?|$)/i.test(activeMediaSource) ? "Plyr + HLS" : "Plyr + HTML5")
-      : "Plyr init...";
   const canSubmitRoomModal = newRoomNameInput.trim().length > 3;
   const canSubmitJoinRoom = normalizeJoinTarget(joinRoomInput).length > 0;
   const isJoinModal = roomModalMode === "join";
@@ -181,6 +175,7 @@ const App: React.FC = () => {
   const ambilightBrightnessTheme = isLightTheme ? ambilightBrightness : Math.max(1.02, ambilightBrightness * 0.9);
   const ambilightSaturationTheme = isLightTheme ? ambilightSaturation : Math.max(1.12, ambilightSaturation * 0.88);
   const pipelineStatus = (roomState.mediaPipelineStatus || "").trim().toLowerCase();
+  const pipelineProgressPercent = parsePipelineProgressPercent(roomState.mediaPipelineMessage || "");
   const showMediaProcessing = !isIframeMode
     && !!activeMediaSource
     && !videoError
@@ -188,7 +183,20 @@ const App: React.FC = () => {
   const processingTitle = pipelineStatus === "pending"
     ? (roomState.mediaPipelineMessage || "Preparing media pipeline...")
     : (isDriveSource ? "Processing Google Drive stream..." : "Loading media...");
-  const processingPercent = mediaLoadingPercent !== null ? Math.max(1, Math.min(99, mediaLoadingPercent)) : null;
+  const loadingProgressPercent = (() => {
+    const buffered = mediaLoadingPercent !== null ? Math.max(1, Math.min(99, mediaLoadingPercent)) : null;
+    const staged = mediaLoadingStagePercent !== null ? Math.max(1, Math.min(99, mediaLoadingStagePercent)) : null;
+    if (buffered === null) {
+      return staged;
+    }
+    if (staged === null) {
+      return buffered;
+    }
+    return Math.max(buffered, staged);
+  })();
+  const processingPercent = pipelineStatus === "pending"
+    ? (pipelineProgressPercent !== null ? Math.max(1, Math.min(99, pipelineProgressPercent)) : null)
+    : loadingProgressPercent;
   const subtitleLanguageGroups = useMemo(() => groupSubtitleCandidatesByLanguage(subtitleResults), [subtitleResults]);
   const iconButtonThemeStyle: React.CSSProperties = isLightTheme
     ? {
@@ -294,7 +302,7 @@ const App: React.FC = () => {
   };
   const responsivePlayerShellStyle: React.CSSProperties = {
     ...styles.playerShell,
-    maxWidth: isMobile ? "100%" : styles.playerShell.maxWidth,
+    maxWidth: isMobile ? "100%" : (viewportWidth >= 1700 ? "780px" : styles.playerShell.maxWidth),
     borderRadius: isMobile ? "14px" : styles.playerShell.borderRadius
   };
   const responsivePlayerHeaderStyle: React.CSSProperties = {
@@ -307,14 +315,10 @@ const App: React.FC = () => {
     fontSize: isNarrowMobile ? "1.5rem" : isMobile ? "1.65rem" : styles.playerTitle.fontSize
   };
   const responsiveVideoStyle: React.CSSProperties = {
-    ...styles.video,
-    minHeight: isMobile ? "34vh" : styles.video.minHeight,
-    maxHeight: isMobile ? "52vh" : styles.video.maxHeight
+    ...styles.video
   };
   const responsiveVideoFrameWrapStyle: React.CSSProperties = {
-    ...styles.videoFrameWrap,
-    minHeight: isMobile ? "34vh" : styles.videoFrameWrap.minHeight,
-    maxHeight: isMobile ? "52vh" : styles.videoFrameWrap.maxHeight
+    ...styles.videoFrameWrap
   };
   const responsiveBottomActionsStyle: React.CSSProperties = {
     ...styles.playerBottomActions,
@@ -381,6 +385,10 @@ const App: React.FC = () => {
       ["--cinelink-plyr-control-hover-bg" as any]: "rgba(97,154,255,0.24)",
       ["--cinelink-plyr-control-hover-border" as any]: "rgba(153,196,255,0.66)"
     };
+  const plyrThemeVarsWithRatio: React.CSSProperties = {
+    ...plyrThemeVars,
+    ["--plyr-video-ratio" as any]: isIframeMode ? "16 / 9" : videoRatioCss
+  };
 
   useEffect(() => {
     isHostRef.current = isHost;
@@ -424,25 +432,41 @@ const App: React.FC = () => {
       return;
     }
     if (pipelineStatus === "failed" && roomState.mediaPipelineMessage) {
-      setPlaybackMediaUrl("");
-      setVideoError(roomState.mediaPipelineMessage);
-      setStatus("Media pipeline failed.");
+      const originalMedia = (roomState.mediaUrl || "").trim();
+      const canTryDirectMkv = (roomState.mediaSourceType || "").trim().toLowerCase() === "hls" && isLikelyMkvUrl(originalMedia);
+      if (canTryDirectMkv && (playbackMediaUrl || "").trim() === originalMedia) {
+        setVideoError("");
+        setStatus("Using direct MKV playback (transcode fallback unavailable).");
+      } else {
+        setPlaybackMediaUrl("");
+        setVideoError(roomState.mediaPipelineMessage);
+        setStatus("Media pipeline failed.");
+      }
     }
-  }, [roomState.mediaPipelineStatus, roomState.mediaPipelineMessage]);
+  }, [roomState.mediaPipelineStatus, roomState.mediaPipelineMessage, roomState.mediaSourceType, roomState.mediaUrl, roomState.resolvedMediaUrl, playbackMediaUrl]);
 
   useEffect(() => {
-    setPlaybackMediaUrl((roomState.resolvedMediaUrl || roomState.mediaUrl || "").trim());
+    const originalMedia = (roomState.mediaUrl || "").trim();
+    const resolvedMedia = (roomState.resolvedMediaUrl || "").trim();
+    const sourceType = (roomState.mediaSourceType || "").trim().toLowerCase();
+    const mkvDirectFirst = sourceType === "hls" && isLikelyMkvUrl(originalMedia) && !!resolvedMedia && resolvedMedia !== originalMedia;
+    setPlaybackMediaUrl((mkvDirectFirst ? originalMedia : (resolvedMedia || originalMedia)).trim());
     triedMkvFallbackRef.current = {};
+    setVideoRatioCss("16 / 9");
   }, [roomState.mediaUrl, roomState.resolvedMediaUrl]);
 
   useEffect(() => {
     if (isIframeMode || !activeMediaSource) {
       setMediaLoading(false);
       setMediaLoadingPercent(null);
+      setMediaLoadingStagePercent(null);
+      lastMediaProgressRef.current = -1;
       return;
     }
     setMediaLoading(true);
     setMediaLoadingPercent(null);
+    setMediaLoadingStagePercent(4);
+    lastMediaProgressRef.current = -1;
   }, [isIframeMode, activeMediaSource]);
 
   useEffect(() => {
@@ -462,6 +486,19 @@ const App: React.FC = () => {
       setSelfSyncingPlayback(false);
     }
   }, [isIframeMode, selfSyncingPlayback]);
+
+  useEffect(() => {
+    if (view !== "room") {
+      return;
+    }
+    if (!roomModalOpen) {
+      return;
+    }
+    if (roomModalMode === "rename") {
+      return;
+    }
+    setRoomModalOpen(false);
+  }, [view, roomModalOpen, roomModalMode]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -562,17 +599,14 @@ const App: React.FC = () => {
         });
       }
       setPlyrReady(true);
-      setPlyrInitError("");
       addDebug("player:engine", { engine: "plyr", mode: isIframeMode ? "youtube" : "html5" });
     } catch (error) {
       setPlyrReady(false);
-      setPlyrInitError(String(error));
       setVideoError(`Plyr initialization failed: ${String(error)}`);
       addDebug("player:engine:error", { error: String(error) });
     }
     return () => {
       setPlyrReady(false);
-      setPlyrInitError("");
       if (hlsRef.current) {
         hlsRef.current.destroy();
         hlsRef.current = null;
@@ -596,7 +630,10 @@ const App: React.FC = () => {
     }
     const source = (playbackMediaUrl || roomState.resolvedMediaUrl || roomState.mediaUrl || "").trim();
     const pipelineStatus = (roomState.mediaPipelineStatus || "").trim().toLowerCase();
-    if (pipelineStatus === "pending") {
+    const originalMedia = (roomState.mediaUrl || "").trim();
+    const resolvedMedia = (roomState.resolvedMediaUrl || "").trim();
+    const mkvDirectFirst = isLikelyMkvUrl(originalMedia) && !!resolvedMedia && resolvedMedia !== originalMedia;
+    if (pipelineStatus === "pending" && !(mkvDirectFirst && source === originalMedia)) {
       if (hlsRef.current) {
         hlsRef.current.destroy();
         hlsRef.current = null;
@@ -845,43 +882,86 @@ const App: React.FC = () => {
     if (!player || isIframeMode) {
       return;
     }
-    const controlsRoot: HTMLElement | null =
-      player.elements?.controls
-      || player.elements?.container?.querySelector?.(".plyr__controls")
+    const container: HTMLElement | null =
+      player.elements?.container
       || null;
-    if (!controlsRoot) {
+    if (!container) {
       return;
     }
 
-    const existing = controlsRoot.querySelector(".cinelink-plyr-audio-btn");
-    if (!canOpenAudioPopup) {
-      if (existing) {
-        existing.remove();
+    const ensureSettingsItems = (): void => {
+      const homeMenu = container.querySelector(".plyr__menu__container [id$='-home'] [role='menu']");
+      const existingAudio = container.querySelector(".cinelink-plyr-audio-menu-btn") as HTMLButtonElement | null;
+      const existingSubtitle = container.querySelector(".cinelink-plyr-subtitle-menu-btn") as HTMLButtonElement | null;
+      if (!homeMenu) {
+        return;
       }
-      return;
-    }
 
-    let button = existing as HTMLButtonElement | null;
-    if (!button) {
-      button = document.createElement("button");
-      button.type = "button";
-      button.className = "plyr__control cinelink-plyr-audio-btn";
-      button.setAttribute("aria-label", "Audio tracks");
-      controlsRoot.appendChild(button);
-    }
-    button.textContent = "AUDIO";
-    button.title = `Audio tracks (${videoAudioTracks.length})`;
-    button.setAttribute("aria-expanded", hostPopup === "audio" ? "true" : "false");
-    button.onclick = () => {
-      setHostPopup((p) => (p === "audio" ? null : "audio"));
+      if (canOpenAudioPopup) {
+        let button = existingAudio;
+        if (!button) {
+          button = document.createElement("button");
+          button.type = "button";
+          button.className = "plyr__control cinelink-plyr-audio-menu-btn";
+          button.setAttribute("role", "menuitem");
+          homeMenu.appendChild(button);
+        }
+        button.setAttribute("aria-label", "Audio tracks");
+        button.title = `Audio tracks (${videoAudioTracks.length})`;
+        button.setAttribute("aria-expanded", hostPopup === "audio" ? "true" : "false");
+        button.innerHTML = `<span>Audio tracks</span><span class="plyr__menu__value">${videoAudioTracks.length}</span>`;
+        button.onclick = (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          setHostPopup((p) => (p === "audio" ? null : "audio"));
+        };
+      } else {
+        existingAudio?.remove();
+      }
+
+      if (canOpenSubtitlePopup) {
+        let button = existingSubtitle;
+        if (!button) {
+          button = document.createElement("button");
+          button.type = "button";
+          button.className = "plyr__control cinelink-plyr-subtitle-menu-btn";
+          button.setAttribute("role", "menuitem");
+          homeMenu.appendChild(button);
+        }
+        button.setAttribute("aria-label", "Subtitles");
+        button.title = subtitleTrackUrl ? "Subtitles (loaded)" : "Subtitles";
+        button.setAttribute("aria-expanded", hostPopup === "subtitle" ? "true" : "false");
+        button.innerHTML = `<span>Subtitles</span><span class="plyr__menu__value">${subtitleTrackUrl ? "On" : "Off"}</span>`;
+        button.onclick = (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          setHostPopup((p) => (p === "subtitle" ? null : "subtitle"));
+          if (!subtitleQuery) {
+            setSubtitleQuery(getReadableRoomName(roomState.roomName || getMediaDisplayName(roomState.mediaUrl || ""), "Subtitle"));
+          }
+        };
+      } else {
+        existingSubtitle?.remove();
+      }
     };
 
-    return () => {
-      if (!canOpenAudioPopup) {
-        button?.remove();
-      }
-    };
-  }, [canOpenAudioPopup, hostPopup, videoAudioTracks.length, isIframeMode, plyrReady]);
+    ensureSettingsItems();
+    const timer = window.setInterval(() => {
+      ensureSettingsItems();
+    }, 800);
+    return () => window.clearInterval(timer);
+  }, [
+    canOpenAudioPopup,
+    canOpenSubtitlePopup,
+    hostPopup,
+    videoAudioTracks.length,
+    subtitleTrackUrl,
+    subtitleQuery,
+    roomState.roomName,
+    roomState.mediaUrl,
+    isIframeMode,
+    plyrReady
+  ]);
 
   const addDebug = (message: string, payload?: unknown): void => {
     const ts = new Date().toISOString();
@@ -1879,6 +1959,35 @@ const App: React.FC = () => {
     }
   };
 
+  const tryApplyTranscodedFallback = (failedSourceUrl?: string): boolean => {
+    const originalMedia = (roomState.mediaUrl || "").trim();
+    const resolvedMedia = (roomState.resolvedMediaUrl || "").trim();
+    const current = (playbackMediaUrl || "").trim();
+    const failed = (failedSourceUrl || "").trim();
+    if (!originalMedia || !resolvedMedia || resolvedMedia === originalMedia) {
+      return false;
+    }
+    if (!isLikelyMkvUrl(originalMedia)) {
+      return false;
+    }
+    const failedWasDirect = failed ? failed === originalMedia : current === originalMedia;
+    if (!failedWasDirect) {
+      return false;
+    }
+    if (current === resolvedMedia) {
+      return false;
+    }
+    setPlaybackMediaUrl(resolvedMedia);
+    setVideoError("");
+    setStatus("Direct MKV failed. Falling back to transcoded stream...");
+    addDebug("video:fallback:to-hls", {
+      from: originalMedia,
+      to: resolvedMedia,
+      failed
+    });
+    return true;
+  };
+
   const updateYoutubeNowPlayingTitle = (): void => {
     const player = ytPlayerRef.current;
     if (!player) {
@@ -2308,36 +2417,74 @@ const App: React.FC = () => {
       const code = video.error?.code ?? -1;
       const msg = `Media error (code=${code}) src=${video.currentSrc || "-"}`;
       const sourceForHint = video.currentSrc || playbackMediaUrl || roomState.mediaUrl;
+      setSelfSyncingPlayback(false);
+      setMediaLoading(false);
+      addDebug("video:error", { code, currentSrc: video.currentSrc });
+      const pipelineFailed = (roomState.mediaPipelineStatus || "").trim().toLowerCase() === "failed";
+      if (!pipelineFailed) {
+        setStatus("Trying browser-compatible fallback...");
+        void tryApplyBrowserFriendlyFallback(sourceForHint).then((applied) => {
+          if (applied) {
+            return;
+          }
+          if (tryApplyTranscodedFallback(sourceForHint)) {
+            return;
+          }
+          const mkvHint = isLikelyMkvUrl(sourceForHint)
+            ? `MKV failed in browser. ${getMkvFailureHint(sourceForHint)}`
+            : "";
+          setVideoError(mkvHint ? `${msg}. ${mkvHint}` : msg);
+          setStatus("Failed to load media.");
+        });
+        return;
+      }
+      if (tryApplyTranscodedFallback(sourceForHint)) {
+        return;
+      }
       const mkvHint = isLikelyMkvUrl(sourceForHint)
         ? `MKV failed in browser. ${getMkvFailureHint(sourceForHint)}`
         : "";
       setVideoError(mkvHint ? `${msg}. ${mkvHint}` : msg);
       setStatus("Failed to load media.");
-      setSelfSyncingPlayback(false);
-      setMediaLoading(false);
-      addDebug("video:error", { code, currentSrc: video.currentSrc });
-      if ((roomState.mediaPipelineStatus || "").trim().toLowerCase() !== "failed") {
-        void tryApplyBrowserFriendlyFallback(sourceForHint);
-      }
     };
 
     const onLoadedMetadata = (): void => {
+      if (video.videoWidth > 0 && video.videoHeight > 0) {
+        setVideoRatioCss(`${video.videoWidth} / ${video.videoHeight}`);
+      }
       if (video.videoWidth === 0 && video.videoHeight === 0 && video.duration > 0) {
         const sourceForHint = video.currentSrc || playbackMediaUrl || roomState.mediaUrl;
-        const hint = `Video stream is not decodable in this browser (audio-only fallback). ${getMkvFailureHint(sourceForHint)}`;
-        setVideoError(hint);
-        setStatus("Video codec unsupported in browser.");
         addDebug("video:audio-only-detected", {
           currentSrc: video.currentSrc,
           duration: video.duration
         });
-        if ((roomState.mediaPipelineStatus || "").trim().toLowerCase() !== "failed") {
-          void tryApplyBrowserFriendlyFallback(sourceForHint);
+        const pipelineFailed = (roomState.mediaPipelineStatus || "").trim().toLowerCase() === "failed";
+        if (!pipelineFailed) {
+          setStatus("Trying browser-compatible fallback...");
+          void tryApplyBrowserFriendlyFallback(sourceForHint).then((applied) => {
+            if (applied) {
+              return;
+            }
+            if (tryApplyTranscodedFallback(sourceForHint)) {
+              return;
+            }
+            const hint = `Video stream is not decodable in this browser (audio-only fallback). ${getMkvFailureHint(sourceForHint)}`;
+            setVideoError(hint);
+            setStatus("Video codec unsupported in browser.");
+          });
+          return;
         }
+        if (tryApplyTranscodedFallback(sourceForHint)) {
+          return;
+        }
+        const hint = `Video stream is not decodable in this browser (audio-only fallback). ${getMkvFailureHint(sourceForHint)}`;
+        setVideoError(hint);
+        setStatus("Video codec unsupported in browser.");
       } else {
         setVideoError("");
         setMediaLoading(false);
         setMediaLoadingPercent(100);
+        setMediaLoadingStagePercent(70);
       }
       if (!isHost || !roomId || !Number.isFinite(video.duration)) {
         refreshVideoSubtitleTracks();
@@ -2355,27 +2502,45 @@ const App: React.FC = () => {
     const onLoadedData = (): void => {
       if (video.videoWidth === 0 && video.videoHeight === 0 && video.duration > 0) {
         const sourceForHint = video.currentSrc || playbackMediaUrl || roomState.mediaUrl;
-        const hint = `Video stream is not decodable in this browser (audio-only fallback). ${getMkvFailureHint(sourceForHint)}`;
-        setVideoError(hint);
-        setStatus("Video codec unsupported in browser.");
         addDebug("video:audio-only-loadeddata", {
           currentSrc: video.currentSrc,
           duration: video.duration
         });
-        if ((roomState.mediaPipelineStatus || "").trim().toLowerCase() !== "failed") {
-          void tryApplyBrowserFriendlyFallback(sourceForHint);
+        const pipelineFailed = (roomState.mediaPipelineStatus || "").trim().toLowerCase() === "failed";
+        if (!pipelineFailed) {
+          setStatus("Trying browser-compatible fallback...");
+          void tryApplyBrowserFriendlyFallback(sourceForHint).then((applied) => {
+            if (applied) {
+              return;
+            }
+            if (tryApplyTranscodedFallback(sourceForHint)) {
+              return;
+            }
+            const hint = `Video stream is not decodable in this browser (audio-only fallback). ${getMkvFailureHint(sourceForHint)}`;
+            setVideoError(hint);
+            setStatus("Video codec unsupported in browser.");
+          });
+          return;
         }
+        if (tryApplyTranscodedFallback(sourceForHint)) {
+          return;
+        }
+        const hint = `Video stream is not decodable in this browser (audio-only fallback). ${getMkvFailureHint(sourceForHint)}`;
+        setVideoError(hint);
+        setStatus("Video codec unsupported in browser.");
         setSelfSyncingPlayback(false);
       }
       if (video.videoWidth > 0 || video.videoHeight > 0) {
         setMediaLoading(false);
         setMediaLoadingPercent(100);
+        setMediaLoadingStagePercent(82);
       }
     };
 
     const onLoadStart = (): void => {
       setMediaLoading(true);
       setMediaLoadingPercent(null);
+      setMediaLoadingStagePercent((prev) => Math.max(prev ?? 0, 8));
     };
 
     const onProgress = (): void => {
@@ -2387,17 +2552,24 @@ const App: React.FC = () => {
         return;
       }
       const pct = Math.round((bufferedEnd / video.duration) * 100);
-      setMediaLoadingPercent(Math.max(0, Math.min(100, pct)));
+      const bounded = Math.max(0, Math.min(100, pct));
+      if (Math.abs(bounded - lastMediaProgressRef.current) < 2) {
+        return;
+      }
+      lastMediaProgressRef.current = bounded;
+      setMediaLoadingPercent(bounded);
     };
 
     const onWaiting = (): void => {
       setMediaLoading(true);
+      setMediaLoadingStagePercent((prev) => Math.max(prev ?? 0, 36));
     };
 
     const onCanPlay = (): void => {
       if (video.videoWidth > 0 || video.videoHeight > 0) {
         setMediaLoading(false);
         setMediaLoadingPercent((prev) => (prev === null ? 100 : prev));
+        setMediaLoadingStagePercent((prev) => Math.max(prev ?? 0, 92));
         if (selfSyncingPlayback) {
           setSelfSyncingPlayback(false);
           setStatus("Synced with room playback.");
@@ -2413,12 +2585,20 @@ const App: React.FC = () => {
     const onPlaying = (): void => {
       setMediaLoading(false);
       setMediaLoadingPercent(100);
+      setMediaLoadingStagePercent(100);
+    };
+
+    const onCanPlayThrough = (): void => {
+      setMediaLoading(false);
+      setMediaLoadingPercent((prev) => Math.max(prev ?? 0, 100));
+      setMediaLoadingStagePercent(100);
     };
 
     video.addEventListener("loadstart", onLoadStart);
     video.addEventListener("progress", onProgress);
     video.addEventListener("waiting", onWaiting);
     video.addEventListener("canplay", onCanPlay);
+    video.addEventListener("canplaythrough", onCanPlayThrough);
     video.addEventListener("playing", onPlaying);
     video.addEventListener("error", onError);
     video.addEventListener("loadedmetadata", onLoadedMetadata);
@@ -2428,6 +2608,7 @@ const App: React.FC = () => {
       video.removeEventListener("progress", onProgress);
       video.removeEventListener("waiting", onWaiting);
       video.removeEventListener("canplay", onCanPlay);
+      video.removeEventListener("canplaythrough", onCanPlayThrough);
       video.removeEventListener("playing", onPlaying);
       video.removeEventListener("error", onError);
       video.removeEventListener("loadedmetadata", onLoadedMetadata);
@@ -2944,6 +3125,8 @@ const App: React.FC = () => {
         }
         .plyr {
           --plyr-font-family: "Segoe UI", "Inter", sans-serif;
+          --plyr-control-spacing: 6px;
+          --plyr-range-track-height: 4px;
         }
         .plyr--video {
           border-radius: 0;
@@ -2955,9 +3138,20 @@ const App: React.FC = () => {
           align-items: center;
           justify-content: center;
         }
+        .plyr--video:not(.plyr--fullscreen-enabled) .plyr__video-wrapper {
+          aspect-ratio: var(--plyr-video-ratio);
+          height: auto !important;
+          max-height: min(46vh, 460px);
+          overflow: hidden;
+        }
+        .plyr--video:not(.plyr--fullscreen-enabled) .plyr__video-embed,
+        .plyr--video:not(.plyr--fullscreen-enabled) .plyr__video-embed iframe {
+          max-height: min(46vh, 460px);
+        }
         .plyr--video .plyr__video-wrapper video {
           width: 100% !important;
-          height: 100% !important;
+          height: auto !important;
+          max-height: 100%;
           object-fit: contain;
           object-position: center center;
           margin: 0 auto;
@@ -2967,6 +3161,12 @@ const App: React.FC = () => {
           border-top: 1px solid rgba(128, 166, 235, 0.24);
           backdrop-filter: blur(12px) saturate(1.12);
           -webkit-backdrop-filter: blur(12px) saturate(1.12);
+          padding: 6px 8px;
+          min-height: 42px;
+        }
+        .plyr--video .plyr__controls .plyr__control {
+          min-width: 32px;
+          min-height: 32px;
         }
         .plyr--video .plyr__control {
           border: 1px solid var(--cinelink-plyr-control-border);
@@ -2983,13 +3183,16 @@ const App: React.FC = () => {
           background: rgba(88, 146, 255, 0.28);
           border-color: rgba(172, 206, 255, 0.78);
         }
-        .plyr--video .cinelink-plyr-audio-btn {
-          min-width: 74px;
-          padding: 0 10px;
-          font-size: 0.66rem;
+        .plyr--video .cinelink-plyr-audio-menu-btn,
+        .plyr--video .cinelink-plyr-subtitle-menu-btn {
+          font-size: 0.78rem;
           font-weight: 800;
-          letter-spacing: 0.05em;
-          text-transform: uppercase;
+          letter-spacing: 0.01em;
+        }
+        .plyr--video .cinelink-plyr-audio-menu-btn .plyr__menu__value,
+        .plyr--video .cinelink-plyr-subtitle-menu-btn .plyr__menu__value {
+          min-width: 1.4em;
+          text-align: right;
         }
         .plyr--video .plyr__progress__buffer {
           color: rgba(255, 255, 255, 0.25);
@@ -3035,13 +3238,55 @@ const App: React.FC = () => {
               <path d="M15 6L9 12L15 18" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
           </button>
-          <strong style={responsivePlayerTitleStyle} title={getReadableRoomName(roomState.roomName || roomId, roomId || "CineLink Room")}>
-            {getReadableRoomName(roomState.roomName || roomId, roomId || "CineLink Room")}
-          </strong>
-          <div style={styles.playerHeaderActions} />
+          <div style={styles.playerTitleWrap}>
+            <strong style={responsivePlayerTitleStyle} title={getReadableRoomName(roomState.roomName || roomId, roomId || "CineLink Room")}>
+              {getReadableRoomName(roomState.roomName || roomId, roomId || "CineLink Room")}
+            </strong>
+            {isHost && (
+              <button
+                style={themedIconButtonStyle}
+                onClick={openRenameRoomModal}
+                title="Rename room"
+                aria-label="Rename room"
+              >
+                ✎
+              </button>
+            )}
+          </div>
+          <div style={styles.playerHeaderActions}>
+            <button
+              style={{ ...themedIconButtonStyle, opacity: isAmbilightAvailable ? (ambilightEnabled ? 1 : 0.66) : 0.42, cursor: isAmbilightAvailable ? "pointer" : "not-allowed" }}
+              onClick={() => {
+                if (!isAmbilightAvailable) {
+                  return;
+                }
+                setAmbilightEnabled((v) => !v);
+              }}
+              title={isAmbilightAvailable ? (ambilightEnabled ? "Ambilight on" : "Ambilight off") : "Ambilight unavailable on YouTube"}
+              disabled={!isAmbilightAvailable}
+            >
+              ◐
+            </button>
+            <button
+              style={{ ...themedIconButtonStyle, opacity: canClaimHost ? 1 : 0.5, cursor: canClaimHost ? "pointer" : "not-allowed" }}
+              onClick={() => void runWithActionState("room:claim-host", requestHostClaim)}
+              title={isHost ? "You are host" : hasPendingClaim ? "Host claim already pending" : "Claim host"}
+              disabled={!canClaimHost}
+            >
+              {renderActionContent("room:claim-host", "♛")}
+            </button>
+            <button
+              style={themedIconButtonStyle}
+              onClick={() => void runWithActionState("room:copy-link", copyRoomLink)}
+              title="Copy link"
+              aria-label="Copy room link"
+            >
+              {renderActionContent("room:copy-link", "🔗")}
+            </button>
+          </div>
         </div>
 
-        <div style={{ ...styles.videoStage, ...plyrThemeVars }}>
+        <div style={{ ...styles.videoStage, ...plyrThemeVarsWithRatio }}>
           {isAmbilightActive && (
             isIframeMode ? (
               <>
@@ -3155,31 +3400,8 @@ const App: React.FC = () => {
             </div>
           )}
 
-          {hostPopup && ((hostPopup === "room" && isHost) || (hostPopup === "media" && (isHost || roomState.allowViewerQueueAdd)) || (hostPopup === "subtitle" && canOpenSubtitlePopup) || (hostPopup === "audio" && canOpenAudioPopup)) && (
+          {hostPopup && ((hostPopup === "media" && (isHost || roomState.allowViewerQueueAdd)) || (hostPopup === "subtitle" && canOpenSubtitlePopup) || (hostPopup === "audio" && canOpenAudioPopup)) && (
             <aside ref={hostPopupRef} style={hostPopupStyle(tokens, true, hostPopup, isLightTheme, isMobile)}>
-              {hostPopup === "room" && (
-                <div style={styles.flyoutBody}>
-                  <h3 style={styles.flyoutTitle}>Room</h3>
-                  <div style={{ ...styles.flyoutIconRow, gridTemplateColumns: "repeat(3, minmax(0, 1fr))" }}>
-                    <button style={themedPopupIconButtonStyle} onClick={openRenameRoomModal} title="Rename room">✎</button>
-                    <button
-                      style={themedPopupIconButtonStyle}
-                      onClick={() => void runWithActionState("room:copy-link", copyRoomLink)}
-                      title="Copy link"
-                    >
-                      {renderActionContent("room:copy-link", "🔗")}
-                    </button>
-                    <button
-                      style={themedPopupIconButtonStyle}
-                      onClick={() => void runWithActionState("room:toggle-queue-policy", toggleViewerQueueAdd)}
-                      title={roomState.allowViewerQueueAdd ? "Disable member queue add" : "Enable member queue add"}
-                    >
-                      {renderActionContent("room:toggle-queue-policy", <MemberQueueIcon enabled={roomState.allowViewerQueueAdd} />)}
-                    </button>
-                  </div>
-                </div>
-              )}
-
               {hostPopup === "media" && (isHost || roomState.allowViewerQueueAdd) && (
                 <div style={styles.flyoutBody}>
                   <h3 style={styles.flyoutTitle}>Media</h3>
@@ -3211,6 +3433,13 @@ const App: React.FC = () => {
                         title="Add last"
                       >
                         {renderActionContent("media:add-last", "↩")}
+                      </button>
+                      <button
+                        style={themedPopupIconButtonStyle}
+                        onClick={() => void runWithActionState("room:toggle-queue-policy", toggleViewerQueueAdd)}
+                        title={roomState.allowViewerQueueAdd ? "Disable member queue add" : "Enable member queue add"}
+                      >
+                        {renderActionContent("room:toggle-queue-policy", <MemberQueueIcon enabled={roomState.allowViewerQueueAdd} />)}
                       </button>
                     </div>
                   ) : (
@@ -3447,39 +3676,7 @@ const App: React.FC = () => {
           <div style={responsiveNowPlayingWrapStyle} title={nowPlayingName}>
             <span style={styles.nowPlayingLabel}>Now Playing:</span>
             <span style={styles.nowPlayingValue}>{nowPlayingName}</span>
-            <span
-              style={{
-                ...styles.nowPlayingLabel,
-                marginLeft: 10,
-                opacity: 0.88,
-                fontWeight: 700
-              }}
-              title={plyrInitError || playbackEngineLabel}
-            >
-              Engine: {playbackEngineLabel}
-            </span>
           </div>
-          <button
-            style={{ ...themedIconButtonStyle, opacity: isAmbilightAvailable ? (ambilightEnabled ? 1 : 0.66) : 0.42, cursor: isAmbilightAvailable ? "pointer" : "not-allowed" }}
-            onClick={() => {
-              if (!isAmbilightAvailable) {
-                return;
-              }
-              setAmbilightEnabled((v) => !v);
-            }}
-            title={isAmbilightAvailable ? (ambilightEnabled ? "Ambilight on" : "Ambilight off") : "Ambilight unavailable on YouTube"}
-            disabled={!isAmbilightAvailable}
-          >
-            ◐
-          </button>
-          <button
-            style={{ ...themedIconButtonStyle, opacity: canClaimHost ? 1 : 0.5, cursor: canClaimHost ? "pointer" : "not-allowed" }}
-            onClick={() => void runWithActionState("room:claim-host", requestHostClaim)}
-            title={isHost ? "You are host" : hasPendingClaim ? "Host claim already pending" : "Claim host"}
-            disabled={!canClaimHost}
-          >
-            {renderActionContent("room:claim-host", "♛")}
-          </button>
           {canOpenMediaPopup && (
             <>
               <button
@@ -3490,40 +3687,6 @@ const App: React.FC = () => {
                 +
               </button>
             </>
-          )}
-          {canOpenAudioPopup && (
-            <button
-              style={themedIconButtonStyle}
-              onClick={() => {
-                setHostPopup((p) => p === "audio" ? null : "audio");
-              }}
-              title="Audio tracks"
-            >
-              <AudioTrackIcon />
-            </button>
-          )}
-          {canOpenSubtitlePopup && (
-            <button
-              style={themedIconButtonStyle}
-              onClick={() => {
-                setHostPopup((p) => p === "subtitle" ? null : "subtitle");
-                if (!subtitleQuery) {
-                  setSubtitleQuery(getReadableRoomName(roomState.roomName || getMediaDisplayName(roomState.mediaUrl || ""), "Subtitle"));
-                }
-              }}
-              title="Subtitles"
-            >
-              CC
-            </button>
-          )}
-          {isHost && (
-            <button
-              style={themedIconButtonStyle}
-              onClick={() => setHostPopup((p) => p === "room" ? null : "room")}
-              title="Room options"
-            >
-              ...
-            </button>
           )}
         </div>
 
@@ -3544,7 +3707,7 @@ const App: React.FC = () => {
               const isCurrentHost = userId === roomState.hostUserId;
               const isPendingRequester = userId === pendingClaimUserId;
               const isManualTransferCandidate = isHost && hostTransferCandidateUserId === userId;
-              const isSelfSyncingAvatar = userId === me && (selfSyncingPlayback || mediaLoading);
+              const isSelfSyncingAvatar = userId === me && selfSyncingPlayback;
               return (
                 <div
                   key={`${userId}-bottom`}
@@ -4051,16 +4214,6 @@ function SearchIcon(): JSX.Element {
   );
 }
 
-function AudioTrackIcon(): JSX.Element {
-  return (
-    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false">
-      <path d="M4 10H8L12 6V18L8 14H4V10Z" fill="currentColor" />
-      <path d="M16 9.5C17.2 10.3 17.9 11.1 17.9 12C17.9 12.9 17.2 13.7 16 14.5" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
-      <path d="M18.6 7.2C20.4 8.5 21.4 10.2 21.4 12C21.4 13.8 20.4 15.5 18.6 16.8" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
-    </svg>
-  );
-}
-
 function getRoomStatusKind(room: RoomSummary): "paused" | "playing" | "live" {
   const hasYouTube = !!getYouTubeVideoId(room.mediaUrl);
   if (hasYouTube && room.playing && room.durationSeconds <= 0) {
@@ -4479,6 +4632,59 @@ function clampNumber(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+function parsePipelineProgressPercent(message: string): number | null {
+  const text = (message || "").trim();
+  if (!text) {
+    return null;
+  }
+  const percentMatch = text.match(/(\d{1,3})(?:\.\d+)?\s*%/);
+  if (percentMatch) {
+    const value = Number(percentMatch[1]);
+    if (Number.isFinite(value)) {
+      return clampNumber(Math.round(value), 0, 100);
+    }
+  }
+  return inferPipelineProgressFromStageText(text);
+}
+
+function inferPipelineProgressFromStageText(message: string): number | null {
+  const text = message.toLowerCase();
+  if (!text) {
+    return null;
+  }
+  if (text.includes("preparing hls stream (480p)")) {
+    return 8;
+  }
+  if (text.includes("playing at 480p")) {
+    return 36;
+  }
+  if (text.includes("quality updated: 480p")) {
+    return 40;
+  }
+  if (text.includes("preparing hls stream (720p)")) {
+    return 48;
+  }
+  if (text.includes("playing at 720p")) {
+    return 72;
+  }
+  if (text.includes("quality updated: 720p")) {
+    return 76;
+  }
+  if (text.includes("preparing hls stream (1080p)")) {
+    return 84;
+  }
+  if (text.includes("playing at 1080p")) {
+    return 96;
+  }
+  if (text.includes("ready") || text.includes("stream ready")) {
+    return 100;
+  }
+  if (text.includes("preparing")) {
+    return 6;
+  }
+  return null;
+}
+
 function sanitizeSubtitleSearchQuery(input: string): string {
   let text = (input || "").trim();
   if (!text) {
@@ -4697,7 +4903,7 @@ const SIZE = {
   lobbyTitle: 2.35,
   brand: 2.0,
   plus: 3.6,
-  playerTitle: 1.85,
+  playerTitle: 1.55,
   cardTitle: 1.5,
   meta: 1.0
 } as const;
@@ -5031,6 +5237,14 @@ const styles: Record<string, React.CSSProperties> = {
     textOverflow: "ellipsis",
     whiteSpace: "nowrap"
   },
+  playerTitleWrap: {
+    display: "flex",
+    alignItems: "center",
+    gap: "8px",
+    minWidth: 0,
+    flex: "1 1 auto",
+    justifyContent: "center"
+  },
   playerHeaderActions: {
     display: "flex",
     alignItems: "center",
@@ -5111,8 +5325,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
   video: {
     width: "100%",
-    minHeight: "56vh",
-    maxHeight: "72vh",
+    height: "auto",
     backgroundColor: "#000",
     display: "block",
     position: "relative",
@@ -5121,8 +5334,7 @@ const styles: Record<string, React.CSSProperties> = {
   videoFrameWrap: {
     width: "100%",
     aspectRatio: "16 / 9",
-    minHeight: "56vh",
-    maxHeight: "72vh",
+    height: "auto",
     backgroundColor: "#000",
     position: "relative",
     zIndex: 1
