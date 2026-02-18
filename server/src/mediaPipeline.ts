@@ -23,6 +23,7 @@ type HlsJobStatus = {
   message: string;
   outputDir: string;
   updatedAtMs: number;
+  assignedWorkerUserId?: string;
 };
 
 type TestHooks = {
@@ -50,6 +51,7 @@ type TestHooks = {
 
 const MEDIA_HTTP_PORT = Number(process.env.CINELINK_MEDIA_PORT || 8099);
 const FFMPEG_BIN = (process.env.CINELINK_FFMPEG_PATH || "ffmpeg").trim() || "ffmpeg";
+const FFPROBE_BIN = (process.env.CINELINK_FFPROBE_PATH || "").trim();
 const MEDIA_RUNTIME_DIR = path.resolve(process.cwd(), ".cinelink-media");
 const MEDIA_HLS_DIR = path.join(MEDIA_RUNTIME_DIR, "hls");
 const HLS_TTL_MS = 1000 * 60 * 60 * 6;
@@ -57,11 +59,29 @@ const CLEANUP_INTERVAL_MS = 1000 * 60 * 20;
 const FAILED_RETRY_AFTER_MS = 1000 * 60 * 2;
 
 const hlsJobs = new Map<string, HlsJobStatus>();
+const workerBusyCount = new Map<string, number>();
 let mediaServerStarted = false;
 let cleanupTimer: NodeJS.Timeout | null = null;
 let ffmpegAvailableCache: boolean | null = null;
 let ffmpegResolvedBin = FFMPEG_BIN;
+let ffprobeResolvedBin = FFPROBE_BIN || "ffprobe";
 let testHooks: TestHooks | null = null;
+
+function logInfo(action: string, payload?: Record<string, unknown>): void {
+  if (payload) {
+    console.log(`[CineLink][${action}]`, payload);
+    return;
+  }
+  console.log(`[CineLink][${action}]`);
+}
+
+function logError(action: string, payload?: Record<string, unknown>): void {
+  if (payload) {
+    console.error(`\x1b[31m[CineLink][${action}]\x1b[0m`, payload);
+    return;
+  }
+  console.error(`\x1b[31m[CineLink][${action}]\x1b[0m`);
+}
 
 export function startMediaPipelineServer(options?: { testHooks?: TestHooks }): void {
   if (mediaServerStarted) {
@@ -74,7 +94,7 @@ export function startMediaPipelineServer(options?: { testHooks?: TestHooks }): v
     void handleRequest(req, res);
   });
   server.listen(MEDIA_HTTP_PORT, "0.0.0.0", () => {
-    console.log(`[CineLink][media-http] listening on http://localhost:${MEDIA_HTTP_PORT}`);
+    logInfo("media-http", { listening: `http://localhost:${MEDIA_HTTP_PORT}` });
     addTestLog("test:server:ready", { baseUrl: getMediaBaseUrl() });
   });
   cleanupTimer = setInterval(() => {
@@ -84,8 +104,118 @@ export function startMediaPipelineServer(options?: { testHooks?: TestHooks }): v
 
 export async function resolvePlaybackSource(mediaUrl: string): Promise<MediaResolveResult> {
   const sourceUrl = (mediaUrl || "").trim();
+  const resolved = await resolvePlaybackSourceInternal(sourceUrl);
   if (!sourceUrl) {
     addTestLog("media:resolve:error", { reason: "empty_media_url" });
+    return resolved;
+  }
+  if (resolved.sourceType === "hls") {
+    addTestLog("media:resolve:start", { sourceType: "mkv", mediaUrl: sourceUrl });
+  } else {
+    addTestLog("media:resolve:ok", { sourceType: resolved.sourceType, mediaUrl: sourceUrl });
+  }
+  return resolved;
+}
+
+type PrewarmOptions = {
+  roomId?: string;
+  hostUserId?: string;
+  participantUserIds?: string[];
+};
+
+export async function prewarmTranscodes(urls: string[], options?: PrewarmOptions): Promise<void> {
+  const uniqueUrls = Array.from(new Set((urls || []).map((value) => (value || "").trim()).filter(Boolean)));
+  if (!uniqueUrls.length) {
+    return;
+  }
+  const participants = Array.from(new Set((options?.participantUserIds || []).filter(Boolean)));
+  const orderedWorkers = [
+    ...(options?.hostUserId ? [options.hostUserId] : []),
+    ...participants.filter((id) => id !== options?.hostUserId)
+  ];
+
+  addTestLog("media:prewarm:start", {
+    roomId: options?.roomId || "",
+    count: uniqueUrls.length,
+    workers: orderedWorkers
+  });
+
+  for (const mediaUrl of uniqueUrls) {
+    if (!isLikelyMkvUrl(mediaUrl)) {
+      continue;
+    }
+    const assignedWorkerUserId = selectWorkerForJob(orderedWorkers);
+    if (assignedWorkerUserId) {
+      bumpWorkerBusy(assignedWorkerUserId, +1);
+    }
+    addTestLog("media:prewarm:queued", {
+      roomId: options?.roomId || "",
+      mediaUrl,
+      assignedWorkerUserId: assignedWorkerUserId || ""
+    });
+    void resolvePlaybackSourceInternal(mediaUrl, { assignedWorkerUserId }).finally(() => {
+      if (assignedWorkerUserId) {
+        bumpWorkerBusy(assignedWorkerUserId, -1);
+      }
+    });
+  }
+}
+
+export async function releaseTranscodesForUrls(urls: string[], reason = "manual-release"): Promise<void> {
+  const uniqueUrls = Array.from(new Set((urls || []).map((value) => (value || "").trim()).filter(Boolean)));
+  for (const mediaUrl of uniqueUrls) {
+    if (!isLikelyMkvUrl(mediaUrl)) {
+      continue;
+    }
+    const key = buildHlsKey(mediaUrl);
+    const job = hlsJobs.get(key);
+    try {
+      if (job?.outputDir) {
+        await fs.rm(job.outputDir, { recursive: true, force: true });
+      } else {
+        const fallbackOutputDir = path.join(MEDIA_HLS_DIR, key);
+        await fs.rm(fallbackOutputDir, { recursive: true, force: true });
+      }
+    } catch {
+      // ignore cleanup errors
+    }
+    hlsJobs.delete(key);
+    addTestLog("media:transcode:released", { key, mediaUrl, reason });
+  }
+}
+
+function selectWorkerForJob(orderedWorkers: string[]): string | undefined {
+  if (!orderedWorkers.length) {
+    return undefined;
+  }
+  for (const userId of orderedWorkers) {
+    const busy = workerBusyCount.get(userId) || 0;
+    if (busy <= 0) {
+      return userId;
+    }
+  }
+  return orderedWorkers[0];
+}
+
+function bumpWorkerBusy(userId: string, delta: number): void {
+  const next = Math.max(0, (workerBusyCount.get(userId) || 0) + delta);
+  if (next <= 0) {
+    workerBusyCount.delete(userId);
+    return;
+  }
+  workerBusyCount.set(userId, next);
+}
+
+function buildHlsKey(inputUrl: string): string {
+  return createHash("sha1").update(inputUrl).digest("hex").slice(0, 20);
+}
+
+async function resolvePlaybackSourceInternal(
+  mediaUrl: string,
+  options?: { assignedWorkerUserId?: string }
+): Promise<MediaResolveResult> {
+  const sourceUrl = (mediaUrl || "").trim();
+  if (!sourceUrl) {
     return {
       sourceType: "unsupported",
       resolvedUrl: "",
@@ -93,9 +223,7 @@ export async function resolvePlaybackSource(mediaUrl: string): Promise<MediaReso
       pipelineMessage: "Empty media URL."
     };
   }
-
   if (getYouTubeVideoId(sourceUrl)) {
-    addTestLog("media:resolve:ok", { sourceType: "youtube", mediaUrl: sourceUrl });
     return {
       sourceType: "youtube",
       resolvedUrl: sourceUrl,
@@ -103,9 +231,7 @@ export async function resolvePlaybackSource(mediaUrl: string): Promise<MediaReso
       pipelineMessage: ""
     };
   }
-
   if (isHlsManifestUrl(sourceUrl)) {
-    addTestLog("media:resolve:ok", { sourceType: "hls", mediaUrl: sourceUrl });
     return {
       sourceType: "hls",
       resolvedUrl: sourceUrl,
@@ -113,9 +239,7 @@ export async function resolvePlaybackSource(mediaUrl: string): Promise<MediaReso
       pipelineMessage: ""
     };
   }
-
   if (isGoogleDriveUrl(sourceUrl)) {
-    addTestLog("media:resolve:ok", { sourceType: "drive", mediaUrl: sourceUrl });
     return {
       sourceType: "drive",
       resolvedUrl: `${getMediaBaseUrl()}/media/drive?url=${encodeURIComponent(sourceUrl)}`,
@@ -123,13 +247,9 @@ export async function resolvePlaybackSource(mediaUrl: string): Promise<MediaReso
       pipelineMessage: ""
     };
   }
-
   if (isLikelyMkvUrl(sourceUrl)) {
-    addTestLog("media:resolve:start", { sourceType: "mkv", mediaUrl: sourceUrl });
-    return ensureHlsFromMkv(sourceUrl);
+    return ensureHlsFromMkv(sourceUrl, options);
   }
-
-  addTestLog("media:resolve:ok", { sourceType: "html5", mediaUrl: sourceUrl });
   return {
     sourceType: "html5",
     resolvedUrl: sourceUrl,
@@ -185,7 +305,10 @@ function isLikelyMkvUrl(url: string): boolean {
   }
 }
 
-async function ensureHlsFromMkv(inputUrl: string): Promise<MediaResolveResult> {
+async function ensureHlsFromMkv(
+  inputUrl: string,
+  options?: { assignedWorkerUserId?: string }
+): Promise<MediaResolveResult> {
   const ffmpegAvailable = await ensureFfmpegAvailable();
   if (!ffmpegAvailable) {
     addTestLog("media:transcode:failed", { reason: "ffmpeg_missing", inputUrl });
@@ -197,20 +320,27 @@ async function ensureHlsFromMkv(inputUrl: string): Promise<MediaResolveResult> {
     };
   }
 
-  const key = createHash("sha1").update(inputUrl).digest("hex").slice(0, 20);
+  const key = buildHlsKey(inputUrl);
   const outputDir = path.join(MEDIA_HLS_DIR, key);
   const manifestPath = path.join(outputDir, "master.m3u8");
   const manifestUrl = `${getMediaBaseUrl()}/media/hls/${encodeURIComponent(key)}/master.m3u8`;
 
   const existing = hlsJobs.get(key);
   if (existing?.status === "ready") {
-    addTestLog("media:transcode:cache-hit", { key });
-    return {
-      sourceType: "hls",
-      resolvedUrl: manifestUrl,
-      pipelineStatus: "ready",
-      pipelineMessage: existing.message
-    };
+    const validCached = await verifyHlsOutputHasVideo(outputDir);
+    if (validCached === true) {
+      addTestLog("media:transcode:cache-hit", { key });
+      return {
+        sourceType: "hls",
+        resolvedUrl: manifestUrl,
+        pipelineStatus: "ready",
+        pipelineMessage: existing.message
+      };
+    }
+    hlsJobs.delete(key);
+    await fs.rm(outputDir, { recursive: true, force: true });
+    addTestLog("media:transcode:cache-invalid", { key, reason: "audio_only_or_unreadable" });
+    logError("media:transcode:cache-invalid", { key, reason: "audio_only_or_unreadable" });
   }
   if (existing?.status === "pending") {
     addTestLog("media:transcode:pending", { key });
@@ -234,21 +364,27 @@ async function ensureHlsFromMkv(inputUrl: string): Promise<MediaResolveResult> {
   }
 
   if (await fileExists(manifestPath)) {
-    addTestLog("media:transcode:manifest-cache", { key });
-    hlsJobs.set(key, {
-      key,
-      inputUrl,
-      status: "ready",
-      message: "",
-      outputDir,
-      updatedAtMs: Date.now()
-    });
-    return {
-      sourceType: "hls",
-      resolvedUrl: manifestUrl,
-      pipelineStatus: "ready",
-      pipelineMessage: ""
-    };
+    const validCached = await verifyHlsOutputHasVideo(outputDir);
+    if (validCached === true) {
+      addTestLog("media:transcode:manifest-cache", { key });
+      hlsJobs.set(key, {
+        key,
+        inputUrl,
+        status: "ready",
+        message: "",
+        outputDir,
+        updatedAtMs: Date.now()
+      });
+      return {
+        sourceType: "hls",
+        resolvedUrl: manifestUrl,
+        pipelineStatus: "ready",
+        pipelineMessage: ""
+      };
+    }
+    await fs.rm(outputDir, { recursive: true, force: true });
+    addTestLog("media:transcode:cache-invalid", { key, reason: "manifest_without_video" });
+    logError("media:transcode:cache-invalid", { key, reason: "manifest_without_video" });
   }
 
   const job: HlsJobStatus = {
@@ -257,7 +393,8 @@ async function ensureHlsFromMkv(inputUrl: string): Promise<MediaResolveResult> {
     status: "pending",
     message: "Preparing HLS stream...",
     outputDir,
-    updatedAtMs: Date.now()
+    updatedAtMs: Date.now(),
+    assignedWorkerUserId: options?.assignedWorkerUserId
   };
   hlsJobs.set(key, job);
   void startTranscodeJob(job);
@@ -273,21 +410,165 @@ async function ensureHlsFromMkv(inputUrl: string): Promise<MediaResolveResult> {
 async function startTranscodeJob(job: HlsJobStatus): Promise<void> {
   await ensureRuntimeDirs();
   await fs.mkdir(job.outputDir, { recursive: true });
+  const hasVideo = await probeInputHasVideo(job.inputUrl);
+  if (hasVideo === false) {
+    job.status = "failed";
+    job.message = "Input has no decodable video stream for HLS transcode.";
+    job.updatedAtMs = Date.now();
+    addTestLog("media:transcode:failed", { key: job.key, reason: "no_video_stream" });
+    console.log("[CineLink][media:transcode:failed]", { key: job.key, reason: "no_video_stream" });
+    return;
+  }
+  const inputDurationSeconds = await probeInputDurationSeconds(job.inputUrl);
+  const inputVideoHeight = await probeInputVideoHeight(job.inputUrl);
+  const profileHeights = buildProgressiveHeights(inputVideoHeight);
+  const readyHeights: number[] = [];
+
+  logInfo("media:transcode:start", {
+    key: job.key,
+    inputUrl: job.inputUrl,
+    profileHeights,
+    assignedWorkerUserId: job.assignedWorkerUserId || ""
+  });
+  addTestLog("media:transcode:start", {
+    key: job.key,
+    inputUrl: job.inputUrl,
+    profileHeights,
+    assignedWorkerUserId: job.assignedWorkerUserId || ""
+  });
+
+  for (let i = 0; i < profileHeights.length; i += 1) {
+    const height = profileHeights[i];
+    const stageName = `${height}p`;
+    job.message = i === 0
+      ? `Preparing HLS stream (${stageName})...`
+      : `Improving quality (${stageName})...`;
+    job.updatedAtMs = Date.now();
+
+    const variantResult = await transcodeHlsVariant(job, height, inputDurationSeconds, stageName);
+    if (!variantResult.ok) {
+      job.status = "failed";
+      job.message = variantResult.message || "HLS transcode failed.";
+      job.updatedAtMs = Date.now();
+      logError("media:transcode:failed", { key: job.key, stage: stageName, reason: job.message });
+      addTestLog("media:transcode:failed", { key: job.key, stage: stageName, reason: job.message });
+      return;
+    }
+
+    readyHeights.push(height);
+    await writeMasterManifest(job.outputDir, readyHeights);
+    const outputHasVideo = await verifyHlsOutputHasVideo(job.outputDir);
+    if (outputHasVideo !== true) {
+      job.status = "failed";
+      job.message = "Transcode produced HLS without a decodable video stream.";
+      job.updatedAtMs = Date.now();
+      logError("media:transcode:failed", { key: job.key, reason: "audio_only_output", stage: stageName });
+      addTestLog("media:transcode:failed", { key: job.key, reason: "audio_only_output", stage: stageName });
+      return;
+    }
+
+    job.status = "ready";
+    job.updatedAtMs = Date.now();
+    if (i === 0) {
+      job.message = `Playing at ${height}p. Improving quality in background...`;
+      addTestLog("media:transcode:first-ready", { key: job.key, height });
+      logInfo("media:transcode:first-ready", { key: job.key, height });
+    } else if (i < profileHeights.length - 1) {
+      job.message = `Quality updated: ${height}p. Preparing next...`;
+      addTestLog("media:transcode:quality-updated", { key: job.key, height });
+      logInfo("media:transcode:quality-updated", { key: job.key, height });
+    } else {
+      job.message = "";
+      addTestLog("media:transcode:ready", { key: job.key, manifest: path.join(job.outputDir, "master.m3u8"), height });
+      logInfo("media:transcode:ready", { key: job.key, manifest: path.join(job.outputDir, "master.m3u8"), height });
+    }
+  }
+}
+
+function extractFfmpegEncodedTimeSeconds(stderrChunk: string): number | null {
+  const match = stderrChunk.match(/time=(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)/);
+  if (!match) {
+    return null;
+  }
+  const hh = Number(match[1] || "0");
+  const mm = Number(match[2] || "0");
+  const ss = Number(match[3] || "0");
+  if (!Number.isFinite(hh) || !Number.isFinite(mm) || !Number.isFinite(ss)) {
+    return null;
+  }
+  return hh * 3600 + mm * 60 + ss;
+}
+
+function buildProgressiveHeights(inputVideoHeight: number | null): number[] {
+  const ordered = [480, 720, 1080];
+  if (!inputVideoHeight || inputVideoHeight <= 0) {
+    return ordered;
+  }
+  const filtered = ordered.filter((h) => h <= inputVideoHeight);
+  if (!filtered.length) {
+    return [Math.max(240, inputVideoHeight)];
+  }
+  return filtered;
+}
+
+function getVariantName(height: number): string {
+  return `${height}p`;
+}
+
+function getVariantPlaylistPath(outputDir: string, height: number): string {
+  return path.join(outputDir, `${getVariantName(height)}.m3u8`);
+}
+
+function getVariantSegmentPattern(outputDir: string, height: number): string {
+  return path.join(outputDir, `${getVariantName(height)}_%05d.ts`);
+}
+
+function estimateVariantBandwidth(height: number): number {
+  if (height >= 1080) {
+    return 5_800_000;
+  }
+  if (height >= 720) {
+    return 3_000_000;
+  }
+  return 1_400_000;
+}
+
+async function writeMasterManifest(outputDir: string, readyHeights: number[]): Promise<void> {
+  const sorted = [...readyHeights].sort((a, b) => a - b);
+  const lines: string[] = ["#EXTM3U", "#EXT-X-VERSION:3"];
+  for (const height of sorted) {
+    const width = Math.max(2, Math.round((height * 16) / 9 / 2) * 2);
+    lines.push(`#EXT-X-STREAM-INF:BANDWIDTH=${estimateVariantBandwidth(height)},RESOLUTION=${width}x${height}`);
+    lines.push(`${getVariantName(height)}.m3u8`);
+  }
+  lines.push("");
+  await fs.writeFile(path.join(outputDir, "master.m3u8"), lines.join("\n"), "utf-8");
+}
+
+async function transcodeHlsVariant(
+  job: HlsJobStatus,
+  height: number,
+  inputDurationSeconds: number | null,
+  stageName: string
+): Promise<{ ok: boolean; message?: string }> {
+  const variantPlaylistPath = getVariantPlaylistPath(job.outputDir, height);
   const args = [
     "-hide_banner",
     "-y",
     "-i",
     job.inputUrl,
     "-map",
-    "0:v:0",
+    "0:v:0?",
     "-map",
     "0:a:0?",
+    "-vf",
+    `scale=w=-2:h=${height}:force_original_aspect_ratio=decrease`,
     "-c:v",
     "libx264",
     "-preset",
     "veryfast",
     "-crf",
-    "21",
+    "22",
     "-c:a",
     "aac",
     "-b:a",
@@ -299,64 +580,94 @@ async function startTranscodeJob(job: HlsJobStatus): Promise<void> {
     "-hls_playlist_type",
     "vod",
     "-hls_segment_filename",
-    path.join(job.outputDir, "segment_%05d.ts"),
-    path.join(job.outputDir, "master.m3u8")
+    getVariantSegmentPattern(job.outputDir, height),
+    variantPlaylistPath
   ];
 
-  console.log("[CineLink][media:transcode:start]", { key: job.key, inputUrl: job.inputUrl });
-  addTestLog("media:transcode:start", { key: job.key, inputUrl: job.inputUrl });
-  const child = spawn(ffmpegResolvedBin, args, { stdio: ["ignore", "ignore", "pipe"] });
-  let stderrTail = "";
-  child.stderr.on("data", (chunk) => {
-    const text = String(chunk || "");
-    if (text) {
-      stderrTail = `${stderrTail}\n${text}`.slice(-4000);
-    }
-    if (text.includes("time=")) {
-      job.updatedAtMs = Date.now();
-    }
+  const result = await new Promise<{ ok: boolean; message?: string }>((resolve) => {
+    const child = spawn(ffmpegResolvedBin, args, { stdio: ["ignore", "ignore", "pipe"] });
+    let stderrTail = "";
+    let lastProgressBucket = -1;
+    child.stderr.on("data", (chunk) => {
+      const text = String(chunk || "");
+      if (text) {
+        stderrTail = `${stderrTail}\n${text}`.slice(-4000);
+      }
+      const encodedAt = extractFfmpegEncodedTimeSeconds(text);
+      if (encodedAt !== null) {
+        job.updatedAtMs = Date.now();
+        if (inputDurationSeconds && inputDurationSeconds > 0) {
+          const pct = Math.max(0, Math.min(99, Math.floor((encodedAt / inputDurationSeconds) * 100)));
+          job.message = `Preparing HLS stream (${stageName})... ${pct}%`;
+          const bucket = Math.floor(pct / 5);
+          if (bucket > lastProgressBucket) {
+            lastProgressBucket = bucket;
+            addTestLog("media:transcode:progress", { key: job.key, stage: stageName, percent: pct });
+          }
+        }
+      }
+    });
+    child.on("error", (error) => {
+      resolve({ ok: false, message: `Transcode spawn failed: ${String(error)}` });
+    });
+    child.on("close", async (code) => {
+      if (code !== 0) {
+        const compact = stderrTail
+          .split("\n")
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .slice(-6)
+          .join(" | ");
+        resolve({
+          ok: false,
+          message: compact ? `ffmpeg exited with code ${code}: ${compact}` : `ffmpeg exited with code ${code}`
+        });
+        return;
+      }
+      const exists = await fileExists(variantPlaylistPath);
+      resolve(exists ? { ok: true } : { ok: false, message: `Missing variant playlist (${stageName}).` });
+    });
   });
+  return result;
+}
 
-  child.on("error", (error) => {
-    job.status = "failed";
-    job.message = `Transcode spawn failed: ${String(error)}. Ensure ffmpeg is installed and in PATH.`;
-    job.updatedAtMs = Date.now();
-    console.log("[CineLink][media:transcode:failed]", { key: job.key, error: String(error) });
-    addTestLog("media:transcode:failed", { key: job.key, error: String(error) });
-  });
+async function verifyHlsOutputHasVideo(outputDir: string): Promise<boolean | null> {
+  const manifestPath = path.join(outputDir, "master.m3u8");
+  if (!(await fileExists(manifestPath))) {
+    return false;
+  }
+  try {
+    const firstSegmentPath = await resolveFirstSegmentPathFromManifest(manifestPath, outputDir, 2);
+    if (!firstSegmentPath) {
+      return false;
+    }
+    return await probeInputHasVideo(firstSegmentPath);
+  } catch {
+    return null;
+  }
+}
 
-  child.on("close", async (code) => {
-    if (code !== 0) {
-      job.status = "failed";
-      const compact = stderrTail
-        .split("\n")
-        .map((line) => line.trim())
-        .filter(Boolean)
-        .slice(-6)
-        .join(" | ");
-      job.message = compact
-        ? `ffmpeg exited with code ${code}: ${compact}`
-        : `ffmpeg exited with code ${code}`;
-      job.updatedAtMs = Date.now();
-      console.log("[CineLink][media:transcode:failed]", { key: job.key, code });
-      addTestLog("media:transcode:failed", { key: job.key, code: String(code), stderr: compact });
-      return;
-    }
-    const manifest = path.join(job.outputDir, "master.m3u8");
-    if (!(await fileExists(manifest))) {
-      job.status = "failed";
-      job.message = "Transcode completed but no HLS manifest was generated.";
-      job.updatedAtMs = Date.now();
-      console.log("[CineLink][media:transcode:failed]", { key: job.key, reason: "manifest_missing" });
-      addTestLog("media:transcode:failed", { key: job.key, reason: "manifest_missing" });
-      return;
-    }
-    job.status = "ready";
-    job.message = "";
-    job.updatedAtMs = Date.now();
-    console.log("[CineLink][media:transcode:ready]", { key: job.key, manifest });
-    addTestLog("media:transcode:ready", { key: job.key, manifest });
-  });
+async function resolveFirstSegmentPathFromManifest(
+  manifestPath: string,
+  baseDir: string,
+  depth: number
+): Promise<string | null> {
+  if (depth < 0) {
+    return null;
+  }
+  const text = await fs.readFile(manifestPath, "utf-8");
+  const firstEntry = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => !!line && !line.startsWith("#"));
+  if (!firstEntry) {
+    return null;
+  }
+  const candidate = path.join(baseDir, firstEntry);
+  if (candidate.toLowerCase().endsWith(".m3u8")) {
+    return await resolveFirstSegmentPathFromManifest(candidate, path.dirname(candidate), depth - 1);
+  }
+  return candidate;
 }
 
 async function ensureRuntimeDirs(): Promise<void> {
@@ -377,13 +688,14 @@ async function ensureFfmpegAvailable(): Promise<boolean> {
     return ffmpegAvailableCache;
   }
   ffmpegResolvedBin = await resolveFfmpegExecutablePath();
+  ffprobeResolvedBin = resolveFfprobeExecutablePath(ffmpegResolvedBin);
   ffmpegAvailableCache = await new Promise<boolean>((resolve) => {
     const child = spawn(ffmpegResolvedBin, ["-version"], { stdio: "ignore" });
     child.on("error", () => resolve(false));
     child.on("close", (code) => resolve(code === 0));
   });
   if (!ffmpegAvailableCache) {
-    console.log("[CineLink][media:ffmpeg:missing]", { ffmpeg: ffmpegResolvedBin });
+    logError("media:ffmpeg:missing", { ffmpeg: ffmpegResolvedBin });
     addTestLog("media:ffmpeg:missing", { ffmpeg: ffmpegResolvedBin });
   }
   return ffmpegAvailableCache;
@@ -404,13 +716,89 @@ async function resolveFfmpegExecutablePath(): Promise<string> {
     if (matches.length) {
       matches.sort((a, b) => b.length - a.length);
       const picked = matches[0];
-      console.log("[CineLink][media:ffmpeg:autodetected]", { ffmpeg: picked });
+      logInfo("media:ffmpeg:autodetected", { ffmpeg: picked });
       return picked;
     }
   } catch {
     // ignore scan errors
   }
   return FFMPEG_BIN;
+}
+
+function resolveFfprobeExecutablePath(ffmpegPath: string): string {
+  if (FFPROBE_BIN) {
+    return FFPROBE_BIN;
+  }
+  const lower = ffmpegPath.toLowerCase();
+  if (lower.endsWith("ffmpeg.exe")) {
+    return `${ffmpegPath.slice(0, -10)}ffprobe.exe`;
+  }
+  if (lower.endsWith("ffmpeg")) {
+    return `${ffmpegPath.slice(0, -6)}ffprobe`;
+  }
+  return "ffprobe";
+}
+
+async function probeInputHasVideo(inputUrl: string): Promise<boolean | null> {
+  return await new Promise<boolean | null>((resolve) => {
+    const args = ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=index", "-of", "csv=p=0", inputUrl];
+    const child = spawn(ffprobeResolvedBin, args, { stdio: ["ignore", "pipe", "ignore"] });
+    const chunks: Buffer[] = [];
+    child.stdout.on("data", (chunk) => {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+    });
+    child.on("error", () => resolve(null));
+    child.on("close", (code) => {
+      if (code !== 0) {
+        resolve(null);
+        return;
+      }
+      const out = Buffer.concat(chunks).toString("utf-8").trim();
+      resolve(!!out);
+    });
+  });
+}
+
+async function probeInputDurationSeconds(inputUrl: string): Promise<number | null> {
+  return await new Promise<number | null>((resolve) => {
+    const args = ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", inputUrl];
+    const child = spawn(ffprobeResolvedBin, args, { stdio: ["ignore", "pipe", "ignore"] });
+    const chunks: Buffer[] = [];
+    child.stdout.on("data", (chunk) => {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+    });
+    child.on("error", () => resolve(null));
+    child.on("close", (code) => {
+      if (code !== 0) {
+        resolve(null);
+        return;
+      }
+      const out = Buffer.concat(chunks).toString("utf-8").trim();
+      const value = Number(out);
+      resolve(Number.isFinite(value) && value > 0 ? value : null);
+    });
+  });
+}
+
+async function probeInputVideoHeight(inputUrl: string): Promise<number | null> {
+  return await new Promise<number | null>((resolve) => {
+    const args = ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=height", "-of", "csv=p=0", inputUrl];
+    const child = spawn(ffprobeResolvedBin, args, { stdio: ["ignore", "pipe", "ignore"] });
+    const chunks: Buffer[] = [];
+    child.stdout.on("data", (chunk) => {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+    });
+    child.on("error", () => resolve(null));
+    child.on("close", (code) => {
+      if (code !== 0) {
+        resolve(null);
+        return;
+      }
+      const out = Buffer.concat(chunks).toString("utf-8").trim();
+      const value = Number(out);
+      resolve(Number.isFinite(value) && value > 0 ? value : null);
+    });
+  });
 }
 
 async function walkFindFfmpeg(dir: string, matches: string[], maxDepth: number): Promise<void> {
@@ -659,11 +1047,16 @@ async function proxyDrive(req: IncomingMessage, res: ServerResponse, targetUrl: 
   }
   try {
     const range = req.headers.range;
-    const upstream = await fetch(targetUrl, {
-      method: req.method === "HEAD" ? "HEAD" : "GET",
-      redirect: "follow",
-      headers: range ? { Range: range } : undefined
-    });
+    const method = req.method === "HEAD" ? "HEAD" : "GET";
+    const upstream = await fetchBestDriveResponse(targetUrl, method, range);
+    if (!upstream) {
+      addTestLog("media:drive:proxy:failed", { targetUrl, reason: "no_binary_response" });
+      sendJson(res, 415, {
+        error: "Google Drive did not return a direct media response (binary stream).",
+        details: { targetUrl }
+      });
+      return;
+    }
     res.statusCode = upstream.status;
     copyHeader(upstream, res, "content-type");
     copyHeader(upstream, res, "content-length");
@@ -681,6 +1074,188 @@ async function proxyDrive(req: IncomingMessage, res: ServerResponse, targetUrl: 
   } catch (error) {
     sendJson(res, 502, { error: `Drive proxy failed: ${String(error)}` });
   }
+}
+
+async function fetchBestDriveResponse(targetUrl: string, method: "GET" | "HEAD", rangeHeader?: string): Promise<Response | null> {
+  const tried: Array<{ url: string; status: number; contentType: string }> = [];
+  const queue = buildDriveCandidateUrls(targetUrl);
+  const seen = new Set<string>();
+  const maxAttempts = 18;
+
+  for (let attempts = 0; queue.length && attempts < maxAttempts; attempts += 1) {
+    const candidate = queue.shift()!;
+    if (!candidate || seen.has(candidate)) {
+      continue;
+    }
+    seen.add(candidate);
+
+    try {
+      // For HEAD probes, prefer a lightweight GET so we can parse Drive HTML confirm pages.
+      const effectiveMethod: "GET" | "HEAD" = method === "HEAD" ? "GET" : method;
+      const headers: Record<string, string> = {};
+      if (rangeHeader) {
+        headers.Range = rangeHeader;
+      } else if (effectiveMethod === "GET" && method === "HEAD") {
+        headers.Range = "bytes=0-0";
+      }
+      const response = await fetch(candidate, {
+        method: effectiveMethod,
+        redirect: "follow",
+        headers: Object.keys(headers).length ? headers : undefined
+      });
+      const finalUrl = response.url || candidate;
+      const contentType = (response.headers.get("content-type") || "").toLowerCase();
+      tried.push({ url: finalUrl, status: response.status, contentType });
+
+      const htmlInterstitial = contentType.includes("text/html");
+      if (response.ok && !htmlInterstitial) {
+        addTestLog("media:drive:proxy:selected", {
+          url: finalUrl,
+          status: response.status,
+          contentType,
+          attempts: attempts + 1
+        });
+        return response;
+      }
+
+      if (response.ok && htmlInterstitial && effectiveMethod === "GET") {
+        const htmlBody = await response.text();
+        const followUps = extractDriveFollowUpUrls(finalUrl, htmlBody);
+        if (followUps.length) {
+          addTestLog("media:drive:proxy:html-followups", {
+            url: finalUrl,
+            count: followUps.length
+          });
+          for (const next of followUps) {
+            if (!seen.has(next)) {
+              queue.push(next);
+            }
+          }
+        }
+      }
+    } catch {
+      // try next candidate
+    }
+  }
+  addTestLog("media:drive:proxy:attempts", { targetUrl, tried });
+  return null;
+}
+
+function buildDriveCandidateUrls(urlValue: string): string[] {
+  const out: string[] = [];
+  const raw = (urlValue || "").trim();
+  if (raw) {
+    out.push(raw);
+  }
+  const fileId = extractDriveFileId(raw);
+  if (!fileId) {
+    return uniqueStrings(out);
+  }
+  const uc = new URL("https://drive.google.com/uc");
+  uc.searchParams.set("export", "download");
+  uc.searchParams.set("confirm", "t");
+  uc.searchParams.set("id", fileId);
+  out.push(uc.toString());
+  const userContent = new URL("https://drive.usercontent.google.com/download");
+  userContent.searchParams.set("export", "download");
+  userContent.searchParams.set("confirm", "t");
+  userContent.searchParams.set("id", fileId);
+  out.push(userContent.toString());
+  return uniqueStrings(out);
+}
+
+function extractDriveFollowUpUrls(baseUrl: string, htmlBody: string): string[] {
+  const out: string[] = [];
+  const decoded = decodeHtmlEntities(htmlBody || "");
+  const base = safeUrl(baseUrl);
+
+  const hrefRegex = /href=(["'])(.*?)\1/gi;
+  let hrefMatch: RegExpExecArray | null = null;
+  while ((hrefMatch = hrefRegex.exec(decoded)) !== null) {
+    const href = (hrefMatch[2] || "").trim();
+    if (!href) {
+      continue;
+    }
+    if (!/confirm=|export=download|\/uc\?|drive\.usercontent\.google\.com\/download/i.test(href)) {
+      continue;
+    }
+    const normalized = toAbsoluteUrl(base, href);
+    if (normalized) {
+      out.push(normalized);
+    }
+  }
+
+  const escapedUrlRegex = /https?:\\\/\\\/[^"']+/gi;
+  const directUrlRegex = /https?:\/\/[^"'\s<]+/gi;
+  const urlMatches = [decoded.match(escapedUrlRegex) || [], decoded.match(directUrlRegex) || []];
+  for (const group of urlMatches) {
+    for (const raw of group) {
+      const unescaped = raw.replace(/\\\//g, "/");
+      if (!/confirm=|export=download|drive\.usercontent\.google\.com\/download/i.test(unescaped)) {
+        continue;
+      }
+      const normalized = toAbsoluteUrl(base, unescaped);
+      if (normalized) {
+        out.push(normalized);
+      }
+    }
+  }
+
+  return uniqueStrings(out);
+}
+
+function decodeHtmlEntities(value: string): string {
+  return value
+    .replace(/&amp;/g, "&")
+    .replace(/&#x3d;/gi, "=")
+    .replace(/&#61;/g, "=")
+    .replace(/&#x26;/gi, "&")
+    .replace(/&#38;/g, "&")
+    .replace(/&quot;/g, "\"")
+    .replace(/&#39;/g, "'");
+}
+
+function safeUrl(value: string): URL | null {
+  try {
+    return new URL(value);
+  } catch {
+    return null;
+  }
+}
+
+function toAbsoluteUrl(base: URL | null, value: string): string | undefined {
+  try {
+    if (/^https?:\/\//i.test(value)) {
+      return new URL(value).toString();
+    }
+    if (value.startsWith("//")) {
+      return `https:${value}`;
+    }
+    if (!base) {
+      return undefined;
+    }
+    return new URL(value, base).toString();
+  } catch {
+    return undefined;
+  }
+}
+
+function extractDriveFileId(urlValue: string): string | undefined {
+  try {
+    const parsed = new URL(urlValue);
+    const fromQuery = (parsed.searchParams.get("id") || "").trim();
+    if (fromQuery) {
+      return fromQuery;
+    }
+    const fromPath = parsed.pathname.match(/\/file\/d\/([^/]+)/i)?.[1] || "";
+    return fromPath.trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return Array.from(new Set(values.filter((value) => !!value)));
 }
 
 async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {

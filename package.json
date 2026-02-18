@@ -22,6 +22,7 @@
     "clean": "node clean.js",
     "test:fixtures": "node tests/scripts/generate-fixtures.mjs",
     "test:player:api": "node tests/api/player-tests.mjs",
+    "test:player:links": "node tests/api/player-real-links.mjs",
     "test:player:e2e": "playwright test --reporter=line",
     "test:player": "node tests/scripts/run-player-tests.mjs"
   },

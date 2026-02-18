@@ -74,6 +74,7 @@ class CineLinkService extends gen_server_1.CineLinkServiceBase {
             return this.acceptWithReason("You were not in this room.", state);
         }
         if (state.participantUserIds.length === 0) {
+            void (0, mediaPipeline_1.releaseTranscodesForUrls)([state.mediaUrl, ...(state.playlistUrls || []), ...(state.playlistHistoryUrls || [])], `room-deleted:${roomId}`);
             this.rooms.delete(roomId);
             this.roomCommunities.delete(roomId);
             this.roomPlaybackReports.delete(roomId);
@@ -225,6 +226,11 @@ class CineLinkService extends gen_server_1.CineLinkServiceBase {
             queuedFromBatch: state.playlistUrls.length,
             roomName: state.roomName
         });
+        void (0, mediaPipeline_1.prewarmTranscodes)([state.mediaUrl, ...state.playlistUrls], {
+            roomId,
+            hostUserId: state.hostUserId,
+            participantUserIds: state.participantUserIds
+        });
         await this.broadcastState("media:set", client.userId, state, client.communityId);
         return this.accept(state);
     }
@@ -371,6 +377,11 @@ class CineLinkService extends gen_server_1.CineLinkServiceBase {
         state.durationSeconds = 0;
         state.playing = request.autoplay;
         await this.refreshMediaPipelineState(state);
+        void (0, mediaPipeline_1.prewarmTranscodes)([state.mediaUrl, ...state.playlistUrls], {
+            roomId,
+            hostUserId: state.hostUserId,
+            participantUserIds: state.participantUserIds
+        });
         this.touchState(state);
         await this.broadcastState("queue:advance", client.userId, state, client.communityId);
         return this.accept(state);
@@ -399,6 +410,11 @@ class CineLinkService extends gen_server_1.CineLinkServiceBase {
         state.durationSeconds = 0;
         state.playing = request.autoplay;
         await this.refreshMediaPipelineState(state);
+        void (0, mediaPipeline_1.prewarmTranscodes)([state.mediaUrl, ...state.playlistUrls], {
+            roomId,
+            hostUserId: state.hostUserId,
+            participantUserIds: state.participantUserIds
+        });
         this.touchState(state);
         await this.broadcastState("queue:previous", client.userId, state, client.communityId);
         return this.accept(state);
@@ -717,6 +733,7 @@ class CineLinkService extends gen_server_1.CineLinkServiceBase {
                 continue;
             }
             if (state.participantUserIds.length === 0) {
+                void (0, mediaPipeline_1.releaseTranscodesForUrls)([state.mediaUrl, ...(state.playlistUrls || []), ...(state.playlistHistoryUrls || [])], `room-deleted:${roomId}`);
                 this.rooms.delete(roomId);
                 this.roomCommunities.delete(roomId);
                 this.roomPlaybackReports.delete(roomId);
@@ -807,6 +824,11 @@ class CineLinkService extends gen_server_1.CineLinkServiceBase {
                 state.playlistUrls.unshift(mediaUrl);
                 state.playlistAddedByUserIds.unshift(client.userId);
             }
+            void (0, mediaPipeline_1.prewarmTranscodes)([state.mediaUrl, ...state.playlistUrls], {
+                roomId,
+                hostUserId: state.hostUserId,
+                participantUserIds: state.participantUserIds
+            });
             this.touchState(state);
             await this.broadcastState("queue:add-next", client.userId, state, client.communityId);
             return this.acceptWithReason(resolvedMediaUrls.length > 1
@@ -817,6 +839,11 @@ class CineLinkService extends gen_server_1.CineLinkServiceBase {
             state.playlistUrls.push(mediaUrl);
             state.playlistAddedByUserIds.push(client.userId);
         }
+        void (0, mediaPipeline_1.prewarmTranscodes)([state.mediaUrl, ...state.playlistUrls], {
+            roomId,
+            hostUserId: state.hostUserId,
+            participantUserIds: state.participantUserIds
+        });
         this.touchState(state);
         await this.broadcastState("queue:add-last", client.userId, state, client.communityId);
         return this.acceptWithReason(resolvedMediaUrls.length > 1
@@ -866,10 +893,23 @@ class CineLinkService extends gen_server_1.CineLinkServiceBase {
         state.resolvedMediaUrl = resolved.resolvedUrl;
         state.mediaPipelineStatus = resolved.pipelineStatus;
         state.mediaPipelineMessage = resolved.pipelineMessage;
-        return (previousSourceType !== state.mediaSourceType ||
+        const changed = previousSourceType !== state.mediaSourceType ||
             previousResolvedUrl !== state.resolvedMediaUrl ||
             previousPipelineStatus !== state.mediaPipelineStatus ||
-            previousPipelineMessage !== state.mediaPipelineMessage);
+            previousPipelineMessage !== state.mediaPipelineMessage;
+        if (changed) {
+            const payload = {
+                roomId: state.roomId,
+                mediaUrl,
+                sourceType: state.mediaSourceType,
+                resolvedMediaUrl: state.resolvedMediaUrl,
+                pipelineStatus: state.mediaPipelineStatus,
+                pipelineMessage: state.mediaPipelineMessage
+            };
+            serverLog("media:engine:selected", payload);
+            (0, testDiagnostics_1.addTestLog)("media:engine:selected", payload);
+        }
+        return changed;
     }
     pruneEmptyRooms() {
         for (const [roomId, state] of this.rooms.entries()) {
@@ -1050,8 +1090,16 @@ async function resolveArchivePreferredPlayableUrl(urlValue) {
         return urlValue;
     }
     const directFilePath = parts.length > 2 ? parts.slice(2).join("/") : "";
-    const directFileLower = directFilePath.toLowerCase();
-    const directFileIsMkv = /\.mkv$/i.test(directFilePath);
+    const directFilePathDecoded = decodeArchivePath(directFilePath);
+    const directFileLower = directFilePathDecoded.toLowerCase();
+    const directFileIsMkv = /\.mkv$/i.test(directFilePathDecoded);
+    const preferredEpisode = extractPreferredEpisodeFromPath(directFilePathDecoded);
+    const directLooksLikeDubCompanion = looksLikeArchiveDubCompanion(directFileLower);
+    // If the user provided a concrete archive file path, preserve it by default.
+    // We only auto-pick another candidate for known problematic companion/dub paths.
+    if (directFilePath && !directLooksLikeDubCompanion) {
+        return urlValue;
+    }
     try {
         const metadataResp = await fetch(`https://archive.org/metadata/${encodeURIComponent(identifier)}`, {
             headers: { "User-Agent": "CineLink/1.0 archive-mkv-fallback" }
@@ -1078,6 +1126,8 @@ async function resolveArchivePreferredPlayableUrl(urlValue) {
         const scoreFile = (file) => {
             const name = (file.name || "").toLowerCase();
             const format = (file.format || "").toLowerCase();
+            const sizeBytes = Number(file.size || 0);
+            const sizeMb = Number.isFinite(sizeBytes) && sizeBytes > 0 ? sizeBytes / (1024 * 1024) : 0;
             let score = 0;
             if (/\.mp4$/i.test(name)) {
                 score += 130;
@@ -1103,12 +1153,31 @@ async function resolveArchivePreferredPlayableUrl(urlValue) {
             else if (format.includes("matroska")) {
                 score += 5;
             }
-            if (directFilePath && name.endsWith(directFileLower)) {
-                score += directFileIsMkv ? 0 : 80;
+            // Prefer full episode files over tiny dubbed-audio companions.
+            score += Math.min(320, Math.round(sizeMb / 2));
+            if (name.includes("/rus sound/") || name.includes("\\rus sound\\")) {
+                score -= 420;
+            }
+            if (name.includes("[anidub]") || name.includes("[get smart]") || name.includes("[mca]") || name.includes("[св-дубль]")) {
+                score -= 160;
+            }
+            if (preferredEpisode !== null) {
+                const episodeRe = new RegExp(`\\)\\s*0?${preferredEpisode}\\s*\\[`);
+                if (episodeRe.test(name)) {
+                    score += 220;
+                }
+            }
+            if (directFilePathDecoded && name.endsWith(directFileLower)) {
+                const directLooksLikeDubAudio = looksLikeArchiveDubCompanion(directFileLower);
+                score += directFileIsMkv ? (directLooksLikeDubAudio ? 0 : 1200) : 220;
             }
             return score;
         };
         const sorted = [...videoFiles].sort((a, b) => scoreFile(b) - scoreFile(a));
+        serverLog("media:archive:candidate-picked", {
+            identifier,
+            top: sorted.slice(0, 3).map((file) => ({ name: file.name || "", score: scoreFile(file), size: file.size || "" }))
+        });
         const best = sorted[0];
         if (!best?.name) {
             return urlValue;
@@ -1128,6 +1197,42 @@ async function resolveArchivePreferredPlayableUrl(urlValue) {
         serverLog("media:archive:fallback-error", { identifier, error: String(error) });
         return urlValue;
     }
+}
+function decodeArchivePath(value) {
+    if (!value) {
+        return "";
+    }
+    return value
+        .split("/")
+        .map((segment) => {
+        try {
+            return decodeURIComponent(segment);
+        }
+        catch {
+            return segment;
+        }
+    })
+        .join("/");
+}
+function looksLikeArchiveDubCompanion(lowerPath) {
+    return (lowerPath.includes("/rus sound/")
+        || lowerPath.includes("\\rus sound\\")
+        || lowerPath.includes("[anidub]")
+        || lowerPath.includes("[get smart]")
+        || lowerPath.includes("[mca]")
+        || lowerPath.includes("[св-дубль]"));
+}
+function extractPreferredEpisodeFromPath(pathValue) {
+    const value = (pathValue || "").trim();
+    if (!value) {
+        return null;
+    }
+    const exact = value.match(/\)\s*(\d{1,3})\s*\[/);
+    if (exact) {
+        const n = Number(exact[1]);
+        return Number.isInteger(n) ? n : null;
+    }
+    return null;
 }
 function extractYouTubePlaylistId(urlValue) {
     try {
@@ -1492,8 +1597,6 @@ async function validatePlayableMediaUrl(url) {
         if (!response.ok) {
             return `Google Drive link failed (HTTP ${response.status}).`;
         }
-        // Drive often returns text/html for anti-abuse/interstitial responses, but the client
-        // can still fallback to iframe mode for playback. Do not block setMedia here.
         if (contentType.includes("text/html")) {
             serverLog("media:validate:drive:html-allowed", {
                 requestedUrl: url,
@@ -1520,9 +1623,8 @@ function toGoogleDriveDirectMediaUrl(url) {
     if (!fileId) {
         return undefined;
     }
-    const direct = new URL("https://drive.usercontent.google.com/download");
+    const direct = new URL("https://drive.google.com/uc");
     direct.searchParams.set("export", "download");
-    direct.searchParams.set("confirm", "t");
     direct.searchParams.set("id", fileId);
     const resourceKey = url.searchParams.get("resourcekey");
     if (resourceKey) {
@@ -1531,9 +1633,8 @@ function toGoogleDriveDirectMediaUrl(url) {
     return direct.toString();
 }
 function toGoogleDriveDirectMediaUrlFromFileId(fileId, resourceKey) {
-    const direct = new URL("https://drive.usercontent.google.com/download");
+    const direct = new URL("https://drive.google.com/uc");
     direct.searchParams.set("export", "download");
-    direct.searchParams.set("confirm", "t");
     direct.searchParams.set("id", fileId);
     if (resourceKey) {
         direct.searchParams.set("resourcekey", resourceKey);
@@ -1759,5 +1860,11 @@ function addParticipant(state, userId) {
 }
 function serverLog(action, payload) {
     const timestamp = new Date().toISOString();
-    console.log(`[CineLink][${timestamp}] ${action}`, payload);
+    const line = `[CineLink][${timestamp}] ${action}`;
+    const isErrorLike = /(error|failed|reject|invalid|timeout)/i.test(action);
+    if (isErrorLike) {
+        console.error(`\x1b[31m${line}\x1b[0m`, payload);
+        return;
+    }
+    console.log(line, payload);
 }

@@ -100,8 +100,20 @@ try {
       String(pipelineResult.state?.resolvedMediaUrl || "")
     );
   }
+
+  const recentLogs = await jfetch(`${baseUrl}/test/logs/recent?limit=200`);
+  const engineLogFound = Array.isArray(recentLogs.body?.items)
+    && recentLogs.body.items.some((item) => String(item?.tag || "") === "media:engine:selected");
+  check("server_engine_log_present", engineLogFound, "expected media:engine:selected in /test/logs/recent");
+  report.serverLogs = recentLogs.body?.items || [];
 } catch (error) {
   check("runner_exception", false, String(error));
+  try {
+    const recentLogs = await jfetch(`${baseUrl}/test/logs/recent?limit=200`);
+    report.serverLogs = recentLogs.body?.items || [];
+  } catch {
+    report.serverLogs = [];
+  }
 }
 
 report.finishedAt = new Date().toISOString();
@@ -112,4 +124,3 @@ if (report.errors.length) {
   process.exit(1);
 }
 console.log("[player-tests] ok");
-

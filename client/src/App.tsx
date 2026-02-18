@@ -16,6 +16,7 @@ type VideoSubtitleTrackInfo = { index: number; label: string; language: string; 
 type VideoAudioTrackInfo = { index: number; label: string; language: string; kind: string };
 type BrowserAudioTrack = { enabled: boolean; label?: string; language?: string; kind?: string };
 type BrowserAudioTrackList = { length: number; [index: number]: BrowserAudioTrack };
+const USE_PLYR_YOUTUBE = true;
 
 const EMPTY_STATE: RoomState = {
   roomId: "",
@@ -62,10 +63,13 @@ const App: React.FC = () => {
   const hostPopupRef = useRef<HTMLElement>(null);
   const bottomActionsRef = useRef<HTMLDivElement>(null);
   const suppressEvents = useRef(false);
+  const suppressUntilRef = useRef(0);
   const isHostRef = useRef(false);
   const isJoinedRef = useRef(false);
   const roomIdRef = useRef("");
   const syncLaunchHandledRef = useRef<string>("");
+  const lastHostPlaybackEmitRef = useRef<{ kind: "play" | "pause"; atSeconds: number; ts: number } | null>(null);
+  const lastHlsQualityMessageRef = useRef("");
 
   const [themeMode, setThemeMode] = useState<"dark" | "light">(rootClient.theme.getTheme());
   const [view, setView] = useState<AppView>("lobby");
@@ -109,6 +113,8 @@ const App: React.FC = () => {
   const [plyrInitError, setPlyrInitError] = useState("");
   const [youtubeNowPlayingTitle, setYoutubeNowPlayingTitle] = useState("");
   const [selfSyncingPlayback, setSelfSyncingPlayback] = useState(false);
+  const [mediaLoading, setMediaLoading] = useState(false);
+  const [mediaLoadingPercent, setMediaLoadingPercent] = useState<number | null>(null);
   const [actionStates, setActionStates] = useState<Record<string, "loading" | "done">>({});
   const [hostTransferCandidateUserId, setHostTransferCandidateUserId] = useState("");
   const triedMkvFallbackRef = useRef<Record<string, boolean>>({});
@@ -129,6 +135,8 @@ const App: React.FC = () => {
   const activeMediaSource = (playbackMediaUrl || roomState.resolvedMediaUrl || roomState.mediaUrl || "").trim();
   const youtubeVideoId = getYouTubeVideoId(activeMediaSource);
   const isIframeMode = !!youtubeVideoId;
+  const isDriveSource = (roomState.mediaSourceType || "").trim().toLowerCase() === "drive"
+    || /drive\.google\.com|drive\.usercontent\.google\.com|docs\.google\.com/i.test(activeMediaSource);
   const currentThumb = getRoomThumbnail(roomState.mediaUrl, mediaThumbCache);
   const isAmbilightAvailable = !isIframeMode;
   const isAmbilightActive = ambilightEnabled && isAmbilightAvailable;
@@ -137,14 +145,14 @@ const App: React.FC = () => {
   const canClaimHost = isJoined && !isHost && !hasPendingClaim;
   const canOpenMediaPopup = isJoined && (isHost || roomState.allowViewerQueueAdd);
   const canOpenSubtitlePopup = isJoined && !isIframeMode;
-  const hasSelectableMkvAudioTracks = isLikelyMkvUrl(activeMediaSource) && videoAudioTracks.length > 1;
-  const canOpenAudioPopup = isJoined && !isIframeMode && hasSelectableMkvAudioTracks;
+  const hasSelectableAudioTracks = videoAudioTracks.length > 1;
+  const canOpenAudioPopup = isJoined && !isIframeMode && hasSelectableAudioTracks;
   const hasLoadedSubtitle = !!subtitleTrackUrl || activeVideoTrackIndex >= 0;
   const nowPlayingName = youtubeVideoId
     ? getReadableRoomName(youtubeNowPlayingTitle || "YouTube video", "YouTube video")
     : getReadableRoomName(getMediaDisplayName(roomState.mediaUrl || activeMediaSource), "No media loaded");
   const playbackEngineLabel = youtubeVideoId
-    ? "YouTube iframe"
+    ? (plyrReady ? "Plyr + YouTube" : "Plyr init...")
     : plyrInitError
       ? "Native fallback"
     : plyrReady
@@ -172,6 +180,15 @@ const App: React.FC = () => {
   const ambilightOpacityTheme = isLightTheme ? ambilightOpacity : Math.min(0.54, ambilightOpacity * 0.58);
   const ambilightBrightnessTheme = isLightTheme ? ambilightBrightness : Math.max(1.02, ambilightBrightness * 0.9);
   const ambilightSaturationTheme = isLightTheme ? ambilightSaturation : Math.max(1.12, ambilightSaturation * 0.88);
+  const pipelineStatus = (roomState.mediaPipelineStatus || "").trim().toLowerCase();
+  const showMediaProcessing = !isIframeMode
+    && !!activeMediaSource
+    && !videoError
+    && (pipelineStatus === "pending" || mediaLoading);
+  const processingTitle = pipelineStatus === "pending"
+    ? (roomState.mediaPipelineMessage || "Preparing media pipeline...")
+    : (isDriveSource ? "Processing Google Drive stream..." : "Loading media...");
+  const processingPercent = mediaLoadingPercent !== null ? Math.max(1, Math.min(99, mediaLoadingPercent)) : null;
   const subtitleLanguageGroups = useMemo(() => groupSubtitleCandidatesByLanguage(subtitleResults), [subtitleResults]);
   const iconButtonThemeStyle: React.CSSProperties = isLightTheme
     ? {
@@ -385,18 +402,31 @@ const App: React.FC = () => {
 
   useEffect(() => {
     if (videoError) {
+      addDebug("video:error:state", {
+        error: videoError,
+        source: activeMediaSource,
+        mediaSourceType: roomState.mediaSourceType,
+        mediaPipelineStatus: roomState.mediaPipelineStatus
+      });
+      console.error(`[CineLink][${new Date().toISOString()}] video:error`, {
+        error: videoError,
+        source: activeMediaSource,
+        mediaSourceType: roomState.mediaSourceType,
+        mediaPipelineStatus: roomState.mediaPipelineStatus
+      });
       setShowVideoErrorModal(true);
     }
-  }, [videoError]);
+  }, [videoError, activeMediaSource, roomState.mediaSourceType, roomState.mediaPipelineStatus]);
 
   useEffect(() => {
-    const pipelineStatus = (roomState.mediaPipelineStatus || "").trim().toLowerCase();
     if (pipelineStatus === "pending") {
       setStatus(roomState.mediaPipelineMessage || "Preparing media pipeline...");
       return;
     }
     if (pipelineStatus === "failed" && roomState.mediaPipelineMessage) {
+      setPlaybackMediaUrl("");
       setVideoError(roomState.mediaPipelineMessage);
+      setStatus("Media pipeline failed.");
     }
   }, [roomState.mediaPipelineStatus, roomState.mediaPipelineMessage]);
 
@@ -404,6 +434,16 @@ const App: React.FC = () => {
     setPlaybackMediaUrl((roomState.resolvedMediaUrl || roomState.mediaUrl || "").trim());
     triedMkvFallbackRef.current = {};
   }, [roomState.mediaUrl, roomState.resolvedMediaUrl]);
+
+  useEffect(() => {
+    if (isIframeMode || !activeMediaSource) {
+      setMediaLoading(false);
+      setMediaLoadingPercent(null);
+      return;
+    }
+    setMediaLoading(true);
+    setMediaLoadingPercent(null);
+  }, [isIframeMode, activeMediaSource]);
 
   useEffect(() => {
     if (!youtubeVideoId && youtubeNowPlayingTitle) {
@@ -427,17 +467,13 @@ const App: React.FC = () => {
     if (typeof window === "undefined") {
       return;
     }
-    if (isIframeMode) {
-      setPlyrReady(false);
-      setPlyrInitError("");
-      if (plyrRef.current) {
-        plyrRef.current.destroy();
-        plyrRef.current = null;
-      }
+    if (view !== "room") {
       return;
     }
     const video = videoRef.current;
-    if (!video || plyrRef.current) {
+    const youtubeHost = ytContainerRef.current;
+    const target = isIframeMode ? youtubeHost : video;
+    if (!target || plyrRef.current) {
       return;
     }
     const PlyrCtor: any = (PlyrModule as any).default ?? (PlyrModule as any);
@@ -445,7 +481,7 @@ const App: React.FC = () => {
       if (typeof PlyrCtor !== "function") {
         throw new Error("Plyr constructor not available");
       }
-      plyrRef.current = new PlyrCtor(video, {
+      plyrRef.current = new PlyrCtor(target, {
         controls: ["play", "progress", "current-time", "duration", "mute", "volume", "settings", "fullscreen"],
         settings: ["speed", "quality"],
         quality: {
@@ -472,9 +508,62 @@ const App: React.FC = () => {
           options: [0.5, 0.75, 1, 1.25, 1.5, 2]
         }
       });
+      if (isIframeMode && youtubeVideoId && USE_PLYR_YOUTUBE) {
+        plyrRef.current.source = {
+          type: "video",
+          sources: [{ src: youtubeVideoId, provider: "youtube" }]
+        };
+        plyrRef.current.on("ready", () => {
+          ytPlayerRef.current = plyrRef.current?.embed || null;
+          ytLoadedIdRef.current = youtubeVideoId;
+          updateYoutubeNowPlayingTitle();
+          if (isHostRef.current && roomIdRef.current) {
+            const duration = Number(ytPlayerRef.current?.getDuration?.() || plyrRef.current?.duration || 0);
+            if (duration > 0) {
+              void runMutation(
+                cineLinkServiceClient.setDuration({ roomId: roomIdRef.current, durationSeconds: duration }),
+                "Duration synced."
+              );
+            }
+          }
+        });
+        plyrRef.current.on("play", () => {
+          if (suppressEvents.current || !isHostRef.current || !isJoinedRef.current) {
+            return;
+          }
+          const at = Number(plyrRef.current?.currentTime || 0);
+          void runMutation(cineLinkServiceClient.play({ roomId: roomIdRef.current, atSeconds: at }), "Play.");
+        });
+        plyrRef.current.on("pause", () => {
+          if (suppressEvents.current || !isHostRef.current || !isJoinedRef.current) {
+            return;
+          }
+          const at = Number(plyrRef.current?.currentTime || 0);
+          void runMutation(cineLinkServiceClient.pause({ roomId: roomIdRef.current, atSeconds: at }), "Pause.");
+        });
+        plyrRef.current.on("ratechange", () => {
+          if (suppressEvents.current || !isHostRef.current || !isJoinedRef.current) {
+            return;
+          }
+          const rate = Number(plyrRef.current?.speed || 1);
+          void runMutation(
+            cineLinkServiceClient.setRate({ roomId: roomIdRef.current, playbackRate: rate }),
+            `Speed ${rate}x.`
+          );
+        });
+        plyrRef.current.on("ended", () => {
+          if (suppressEvents.current || !isHostRef.current || !isJoinedRef.current) {
+            return;
+          }
+          void runMutation(
+            cineLinkServiceClient.advanceQueue({ roomId: roomIdRef.current, autoplay: true }),
+            "Loaded next from queue."
+          );
+        });
+      }
       setPlyrReady(true);
       setPlyrInitError("");
-      addDebug("player:engine", { engine: "plyr", mode: "html5" });
+      addDebug("player:engine", { engine: "plyr", mode: isIframeMode ? "youtube" : "html5" });
     } catch (error) {
       setPlyrReady(false);
       setPlyrInitError(String(error));
@@ -492,8 +581,10 @@ const App: React.FC = () => {
         plyrRef.current.destroy();
         plyrRef.current = null;
       }
+      ytPlayerRef.current = null;
+      ytLoadedIdRef.current = "";
     };
-  }, [isIframeMode]);
+  }, [isIframeMode, view, roomId, youtubeVideoId]);
 
   useEffect(() => {
     if (isIframeMode) {
@@ -564,6 +655,13 @@ const App: React.FC = () => {
               hls.currentLevel = levelIndex;
             }
           };
+          refreshVideoAudioTracks();
+        });
+        hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, () => {
+          refreshVideoAudioTracks();
+        });
+        hls.on(Hls.Events.AUDIO_TRACK_SWITCHED, () => {
+          refreshVideoAudioTracks();
         });
         hls.on(Hls.Events.ERROR, (_event, data) => {
           if (data?.fatal) {
@@ -596,6 +694,68 @@ const App: React.FC = () => {
       video.load();
     }
   }, [isIframeMode, playbackMediaUrl, roomState.resolvedMediaUrl, roomState.mediaUrl, roomState.mediaPipelineStatus]);
+
+  useEffect(() => {
+    if (isIframeMode) {
+      return;
+    }
+    const source = (playbackMediaUrl || roomState.resolvedMediaUrl || roomState.mediaUrl || "").trim();
+    if (!/\.m3u8(\?|$)/i.test(source)) {
+      lastHlsQualityMessageRef.current = "";
+      return;
+    }
+    const msg = (roomState.mediaPipelineMessage || "").trim();
+    if (!msg || msg === lastHlsQualityMessageRef.current) {
+      return;
+    }
+    lastHlsQualityMessageRef.current = msg;
+    const shouldRefresh = /quality updated|improving quality|playing at \d+p/i.test(msg);
+    if (!shouldRefresh) {
+      return;
+    }
+    const hls = hlsRef.current;
+    const video = videoRef.current;
+    if (!hls || !video) {
+      return;
+    }
+    const keepTime = Number(video.currentTime || 0);
+    const keepPlaying = !video.paused;
+    const onParsed = (): void => {
+      hls.off(Hls.Events.MANIFEST_PARSED, onParsed);
+      withSuppressedEvents(() => {
+        if (Number.isFinite(keepTime) && keepTime > 0) {
+          video.currentTime = keepTime;
+        }
+      }, 180);
+      if (keepPlaying) {
+        void video.play().catch(() => {});
+      }
+    };
+    hls.on(Hls.Events.MANIFEST_PARSED, onParsed);
+    hls.loadSource(source);
+    hls.attachMedia(video);
+    addDebug("hls:manifest:refresh", { source, reason: msg });
+  }, [isIframeMode, playbackMediaUrl, roomState.resolvedMediaUrl, roomState.mediaUrl, roomState.mediaPipelineMessage]);
+
+  useEffect(() => {
+    if (!isIframeMode || !USE_PLYR_YOUTUBE || !youtubeVideoId) {
+      return;
+    }
+    const plyr = plyrRef.current;
+    if (!plyr) {
+      return;
+    }
+    if (ytLoadedIdRef.current === youtubeVideoId) {
+      return;
+    }
+    withSuppressedEvents(() => {
+      plyr.source = {
+        type: "video",
+        sources: [{ src: youtubeVideoId, provider: "youtube" }]
+      };
+    }, 220);
+    ytLoadedIdRef.current = youtubeVideoId;
+  }, [isIframeMode, youtubeVideoId]);
 
   useEffect(() => {
     if (!subtitleTrackUrl) {
@@ -680,7 +840,57 @@ const App: React.FC = () => {
     }
   }, [hostPopup, canOpenSubtitlePopup]);
 
-  const addDebug = (_message: string, _payload?: unknown): void => undefined;
+  useEffect(() => {
+    const player = plyrRef.current as any;
+    if (!player || isIframeMode) {
+      return;
+    }
+    const controlsRoot: HTMLElement | null =
+      player.elements?.controls
+      || player.elements?.container?.querySelector?.(".plyr__controls")
+      || null;
+    if (!controlsRoot) {
+      return;
+    }
+
+    const existing = controlsRoot.querySelector(".cinelink-plyr-audio-btn");
+    if (!canOpenAudioPopup) {
+      if (existing) {
+        existing.remove();
+      }
+      return;
+    }
+
+    let button = existing as HTMLButtonElement | null;
+    if (!button) {
+      button = document.createElement("button");
+      button.type = "button";
+      button.className = "plyr__control cinelink-plyr-audio-btn";
+      button.setAttribute("aria-label", "Audio tracks");
+      controlsRoot.appendChild(button);
+    }
+    button.textContent = "AUDIO";
+    button.title = `Audio tracks (${videoAudioTracks.length})`;
+    button.setAttribute("aria-expanded", hostPopup === "audio" ? "true" : "false");
+    button.onclick = () => {
+      setHostPopup((p) => (p === "audio" ? null : "audio"));
+    };
+
+    return () => {
+      if (!canOpenAudioPopup) {
+        button?.remove();
+      }
+    };
+  }, [canOpenAudioPopup, hostPopup, videoAudioTracks.length, isIframeMode, plyrReady]);
+
+  const addDebug = (message: string, payload?: unknown): void => {
+    const ts = new Date().toISOString();
+    if (payload === undefined) {
+      console.log(`[CineLink][${ts}] ${message}`);
+      return;
+    }
+    console.log(`[CineLink][${ts}] ${message}`, payload);
+  };
   const subtitleDebug = (message: string, payload?: unknown): void => {
     const ts = new Date().toISOString();
     if (payload === undefined) {
@@ -734,6 +944,20 @@ const App: React.FC = () => {
     syncPlyrCaptions(false);
   };
 
+  const withSuppressedEvents = (fn: () => void, holdMs = 220): void => {
+    suppressUntilRef.current = Date.now() + holdMs;
+    suppressEvents.current = true;
+    try {
+      fn();
+    } finally {
+      window.setTimeout(() => {
+        if (Date.now() >= suppressUntilRef.current) {
+          suppressEvents.current = false;
+        }
+      }, holdMs);
+    }
+  };
+
   const refreshVideoSubtitleTracks = (): void => {
     const video = videoRef.current;
     if (!video || isIframeMode) {
@@ -769,6 +993,20 @@ const App: React.FC = () => {
   };
 
   const refreshVideoAudioTracks = (): void => {
+    const hls = hlsRef.current as any;
+    if (hls && Array.isArray(hls.audioTracks) && hls.audioTracks.length > 0) {
+      const list: VideoAudioTrackInfo[] = hls.audioTracks.map((track: any, index: number) => ({
+        index,
+        label: (track?.name || track?.lang || `Audio ${index + 1}`).toString().trim(),
+        language: (track?.lang || "").toString().trim(),
+        kind: "audio"
+      }));
+      const active = Number.isInteger(hls.audioTrack) ? Number(hls.audioTrack) : -1;
+      setVideoAudioTracks(list);
+      setActiveVideoAudioTrackIndex(active);
+      return;
+    }
+
     const video = videoRef.current;
     if (!video || isIframeMode) {
       setVideoAudioTracks([]);
@@ -800,6 +1038,19 @@ const App: React.FC = () => {
   };
 
   const selectVideoAudioTrack = (index: number): void => {
+    const hls = hlsRef.current as any;
+    if (hls && Array.isArray(hls.audioTracks) && hls.audioTracks.length > 0) {
+      const targetIndex = Number(index);
+      if (!Number.isInteger(targetIndex) || targetIndex < 0 || targetIndex >= hls.audioTracks.length) {
+        return;
+      }
+      hls.audioTrack = targetIndex;
+      const chosen = videoAudioTracks.find((item) => item.index === targetIndex);
+      setActiveVideoAudioTrackIndex(targetIndex);
+      setStatus(`Audio track selected: ${chosen?.label || `Audio ${targetIndex + 1}`}`);
+      return;
+    }
+
     const video = videoRef.current;
     if (!video || isIframeMode) {
       return;
@@ -1031,34 +1282,34 @@ const App: React.FC = () => {
         return;
       }
 
-      suppressEvents.current = true;
-      try {
-        if (ytLoadedIdRef.current !== youtubeId) {
-          if (state.playing) {
-            player.loadVideoById(youtubeId, state.currentTimeSeconds || 0);
+      withSuppressedEvents(() => {
+        try {
+          if (ytLoadedIdRef.current !== youtubeId) {
+            if (state.playing) {
+              player.loadVideoById(youtubeId, state.currentTimeSeconds || 0);
+            } else {
+              player.cueVideoById(youtubeId, state.currentTimeSeconds || 0);
+            }
+            ytLoadedIdRef.current = youtubeId;
           } else {
-            player.cueVideoById(youtubeId, state.currentTimeSeconds || 0);
+            const targetTime = expectedTime(state);
+            const current = Number(player.getCurrentTime?.() || 0);
+            if (Math.abs(current - targetTime) > 1) {
+              player.seekTo(targetTime, true);
+            }
+            if (state.playing) {
+              player.playVideo?.();
+            } else {
+              player.pauseVideo?.();
+            }
           }
-          ytLoadedIdRef.current = youtubeId;
-        } else {
-          const targetTime = expectedTime(state);
-          const current = Number(player.getCurrentTime?.() || 0);
-          if (Math.abs(current - targetTime) > 1) {
-            player.seekTo(targetTime, true);
+          if (state.playbackRate) {
+            player.setPlaybackRate?.(state.playbackRate);
           }
-          if (state.playing) {
-            player.playVideo?.();
-          } else {
-            player.pauseVideo?.();
-          }
+        } catch (error) {
+          addDebug("youtube:apply:error", { error: String(error) });
         }
-        if (state.playbackRate) {
-          player.setPlaybackRate?.(state.playbackRate);
-        }
-      } catch (error) {
-        addDebug("youtube:apply:error", { error: String(error) });
-      }
-      suppressEvents.current = false;
+      });
       setVideoError("");
       return;
     }
@@ -1067,7 +1318,10 @@ const App: React.FC = () => {
       return;
     }
 
-    const nextMediaUrl = (state.resolvedMediaUrl || state.mediaUrl || "").trim();
+    const pipelineStatus = (state.mediaPipelineStatus || "").trim().toLowerCase();
+    const nextMediaUrl = pipelineStatus === "failed"
+      ? ""
+      : (state.resolvedMediaUrl || state.mediaUrl || "").trim();
     if (nextMediaUrl && nextMediaUrl !== playbackMediaUrl) {
       setPlaybackMediaUrl(nextMediaUrl);
       setSelfSyncingPlayback(true);
@@ -1082,21 +1336,21 @@ const App: React.FC = () => {
 
     const targetTime = expectedTime(state);
     const drift = Math.abs(video.currentTime - targetTime);
-    suppressEvents.current = true;
-    if (drift > 1) {
-      video.currentTime = targetTime;
-    }
-    video.playbackRate = state.playbackRate || 1;
+    withSuppressedEvents(() => {
+      if (drift > 1) {
+        video.currentTime = targetTime;
+      }
+      video.playbackRate = state.playbackRate || 1;
 
-    if (state.playing && video.paused) {
-      video.play().catch((error) => {
-        setStatus(`Autoplay blocked: ${String(error)}`);
-      });
-    }
-    if (!state.playing && !video.paused) {
-      video.pause();
-    }
-    suppressEvents.current = false;
+      if (state.playing && video.paused) {
+        video.play().catch((error) => {
+          setStatus(`Autoplay blocked: ${String(error)}`);
+        });
+      }
+      if (!state.playing && !video.paused) {
+        video.pause();
+      }
+    });
   };
 
   const joinRoom = async (targetRoomId: string): Promise<boolean> => {
@@ -1767,6 +2021,10 @@ const App: React.FC = () => {
     if (typeof window === "undefined") {
       return;
     }
+    if (USE_PLYR_YOUTUBE) {
+      setYtApiReady(true);
+      return;
+    }
     if ((window as any).YT?.Player) {
       setYtApiReady(true);
       return;
@@ -1896,6 +2154,9 @@ const App: React.FC = () => {
   }, [isHost, isJoined, pendingClaimUserId, hostTransferCandidateUserId, participants]);
 
   useEffect(() => {
+    if (USE_PLYR_YOUTUBE) {
+      return;
+    }
     if (!youtubeVideoId || !ytApiReady || !ytContainerRef.current) {
       return;
     }
@@ -2053,8 +2314,11 @@ const App: React.FC = () => {
       setVideoError(mkvHint ? `${msg}. ${mkvHint}` : msg);
       setStatus("Failed to load media.");
       setSelfSyncingPlayback(false);
+      setMediaLoading(false);
       addDebug("video:error", { code, currentSrc: video.currentSrc });
-      void tryApplyBrowserFriendlyFallback(sourceForHint);
+      if ((roomState.mediaPipelineStatus || "").trim().toLowerCase() !== "failed") {
+        void tryApplyBrowserFriendlyFallback(sourceForHint);
+      }
     };
 
     const onLoadedMetadata = (): void => {
@@ -2067,9 +2331,13 @@ const App: React.FC = () => {
           currentSrc: video.currentSrc,
           duration: video.duration
         });
-        void tryApplyBrowserFriendlyFallback(sourceForHint);
+        if ((roomState.mediaPipelineStatus || "").trim().toLowerCase() !== "failed") {
+          void tryApplyBrowserFriendlyFallback(sourceForHint);
+        }
       } else {
         setVideoError("");
+        setMediaLoading(false);
+        setMediaLoadingPercent(100);
       }
       if (!isHost || !roomId || !Number.isFinite(video.duration)) {
         refreshVideoSubtitleTracks();
@@ -2094,23 +2362,73 @@ const App: React.FC = () => {
           currentSrc: video.currentSrc,
           duration: video.duration
         });
-        void tryApplyBrowserFriendlyFallback(sourceForHint);
+        if ((roomState.mediaPipelineStatus || "").trim().toLowerCase() !== "failed") {
+          void tryApplyBrowserFriendlyFallback(sourceForHint);
+        }
         setSelfSyncingPlayback(false);
-      } else if ((video.videoWidth > 0 || video.videoHeight > 0) && selfSyncingPlayback) {
-        setSelfSyncingPlayback(false);
-        setStatus("Synced with room playback.");
-        addDebug("join:sync:complete", {
-          currentSrc: video.currentSrc,
-          currentTime: video.currentTime,
-          duration: video.duration
-        });
+      }
+      if (video.videoWidth > 0 || video.videoHeight > 0) {
+        setMediaLoading(false);
+        setMediaLoadingPercent(100);
       }
     };
 
+    const onLoadStart = (): void => {
+      setMediaLoading(true);
+      setMediaLoadingPercent(null);
+    };
+
+    const onProgress = (): void => {
+      if (!Number.isFinite(video.duration) || video.duration <= 0 || video.buffered.length === 0) {
+        return;
+      }
+      const bufferedEnd = video.buffered.end(video.buffered.length - 1);
+      if (!Number.isFinite(bufferedEnd) || bufferedEnd <= 0) {
+        return;
+      }
+      const pct = Math.round((bufferedEnd / video.duration) * 100);
+      setMediaLoadingPercent(Math.max(0, Math.min(100, pct)));
+    };
+
+    const onWaiting = (): void => {
+      setMediaLoading(true);
+    };
+
+    const onCanPlay = (): void => {
+      if (video.videoWidth > 0 || video.videoHeight > 0) {
+        setMediaLoading(false);
+        setMediaLoadingPercent((prev) => (prev === null ? 100 : prev));
+        if (selfSyncingPlayback) {
+          setSelfSyncingPlayback(false);
+          setStatus("Synced with room playback.");
+          addDebug("join:sync:complete", {
+            currentSrc: video.currentSrc,
+            currentTime: video.currentTime,
+            duration: video.duration
+          });
+        }
+      }
+    };
+
+    const onPlaying = (): void => {
+      setMediaLoading(false);
+      setMediaLoadingPercent(100);
+    };
+
+    video.addEventListener("loadstart", onLoadStart);
+    video.addEventListener("progress", onProgress);
+    video.addEventListener("waiting", onWaiting);
+    video.addEventListener("canplay", onCanPlay);
+    video.addEventListener("playing", onPlaying);
     video.addEventListener("error", onError);
     video.addEventListener("loadedmetadata", onLoadedMetadata);
     video.addEventListener("loadeddata", onLoadedData);
     return () => {
+      video.removeEventListener("loadstart", onLoadStart);
+      video.removeEventListener("progress", onProgress);
+      video.removeEventListener("waiting", onWaiting);
+      video.removeEventListener("canplay", onCanPlay);
+      video.removeEventListener("playing", onPlaying);
       video.removeEventListener("error", onError);
       video.removeEventListener("loadedmetadata", onLoadedMetadata);
       video.removeEventListener("loadeddata", onLoadedData);
@@ -2131,9 +2449,9 @@ const App: React.FC = () => {
       const target = expectedTime(roomState);
       const diff = video.currentTime - target;
       if (Math.abs(diff) > 1) {
-        suppressEvents.current = true;
-        video.currentTime = target;
-        suppressEvents.current = false;
+        withSuppressedEvents(() => {
+          video.currentTime = target;
+        }, 180);
         return;
       }
 
@@ -2311,17 +2629,35 @@ const App: React.FC = () => {
   }, [isIframeMode, roomState.mediaUrl, mediaThumbCache]);
 
   const emitPlay = async (): Promise<void> => {
-    if (!isHost || suppressEvents.current || !videoRef.current) {
+    if (!isHost || suppressEvents.current || Date.now() < suppressUntilRef.current || !videoRef.current) {
       return;
     }
-    await runMutation(cineLinkServiceClient.play({ roomId, atSeconds: videoRef.current.currentTime }), "Play.");
+    if (roomState.playing) {
+      return;
+    }
+    const atSeconds = videoRef.current.currentTime;
+    const last = lastHostPlaybackEmitRef.current;
+    if (last && last.kind === "play" && Math.abs(last.atSeconds - atSeconds) < 0.4 && Date.now() - last.ts < 800) {
+      return;
+    }
+    lastHostPlaybackEmitRef.current = { kind: "play", atSeconds, ts: Date.now() };
+    await runMutation(cineLinkServiceClient.play({ roomId, atSeconds }), "Play.");
   };
 
   const emitPause = async (): Promise<void> => {
-    if (!isHost || suppressEvents.current || !videoRef.current) {
+    if (!isHost || suppressEvents.current || Date.now() < suppressUntilRef.current || !videoRef.current) {
       return;
     }
-    await runMutation(cineLinkServiceClient.pause({ roomId, atSeconds: videoRef.current.currentTime }), "Pause.");
+    if (!roomState.playing) {
+      return;
+    }
+    const atSeconds = videoRef.current.currentTime;
+    const last = lastHostPlaybackEmitRef.current;
+    if (last && last.kind === "pause" && Math.abs(last.atSeconds - atSeconds) < 0.4 && Date.now() - last.ts < 800) {
+      return;
+    }
+    lastHostPlaybackEmitRef.current = { kind: "pause", atSeconds, ts: Date.now() };
+    await runMutation(cineLinkServiceClient.pause({ roomId, atSeconds }), "Pause.");
   };
 
   const emitSeek = async (): Promise<void> => {
@@ -2613,6 +2949,20 @@ const App: React.FC = () => {
           border-radius: 0;
           overflow: hidden;
         }
+        .plyr--video .plyr__video-wrapper {
+          background: #000;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+        .plyr--video .plyr__video-wrapper video {
+          width: 100% !important;
+          height: 100% !important;
+          object-fit: contain;
+          object-position: center center;
+          margin: 0 auto;
+          background: #000;
+        }
         .plyr--video .plyr__controls {
           border-top: 1px solid rgba(128, 166, 235, 0.24);
           backdrop-filter: blur(12px) saturate(1.12);
@@ -2633,6 +2983,14 @@ const App: React.FC = () => {
           background: rgba(88, 146, 255, 0.28);
           border-color: rgba(172, 206, 255, 0.78);
         }
+        .plyr--video .cinelink-plyr-audio-btn {
+          min-width: 74px;
+          padding: 0 10px;
+          font-size: 0.66rem;
+          font-weight: 800;
+          letter-spacing: 0.05em;
+          text-transform: uppercase;
+        }
         .plyr--video .plyr__progress__buffer {
           color: rgba(255, 255, 255, 0.25);
         }
@@ -2641,6 +2999,26 @@ const App: React.FC = () => {
           box-shadow: 0 12px 32px rgba(9, 18, 42, 0.38);
           backdrop-filter: blur(16px) saturate(1.14);
           -webkit-backdrop-filter: blur(16px) saturate(1.14);
+        }
+        .plyr--fullscreen-enabled .plyr__video-wrapper {
+          height: 100vh !important;
+          max-height: 100vh !important;
+        }
+        .plyr--fullscreen-enabled video {
+          width: 100vw !important;
+          height: 100vh !important;
+          min-height: 0 !important;
+          max-height: none !important;
+          object-fit: contain !important;
+          background: #000 !important;
+        }
+        .plyr--fullscreen-enabled .plyr__video-embed,
+        .plyr--fullscreen-enabled .plyr__video-embed iframe {
+          width: 100vw !important;
+          height: 100vh !important;
+          min-height: 0 !important;
+          max-height: none !important;
+          background: #000 !important;
         }
         .plyr__tooltip {
           backdrop-filter: blur(10px);
@@ -2722,13 +3100,13 @@ const App: React.FC = () => {
           )}
           {youtubeVideoId ? (
             <div style={responsiveVideoFrameWrapStyle}>
-              <div ref={ytContainerRef} style={styles.videoFrame} />
+              <div ref={ytContainerRef} className="plyr__video-embed" style={styles.videoFrame} />
             </div>
           ) : (
             <video
               ref={videoRef}
               style={responsiveVideoStyle}
-              controls={!!plyrInitError}
+              controls
               onPlay={emitPlay}
               onPause={emitPause}
               onEnded={() => {
@@ -2756,6 +3134,25 @@ const App: React.FC = () => {
                 />
               )}
             </video>
+          )}
+
+          {showMediaProcessing && (
+            <div style={styles.processingOverlay}>
+              <div style={styles.processingCard}>
+                <strong style={styles.processingTitle}>{processingTitle}</strong>
+                <div style={styles.processingBarBg}>
+                  <div
+                    style={{
+                      ...styles.processingBarFill,
+                      width: processingPercent !== null ? `${processingPercent}%` : "34%"
+                    }}
+                  />
+                </div>
+                <span style={styles.processingMeta}>
+                  {processingPercent !== null ? `${processingPercent}%` : "Preparing stream..."}
+                </span>
+              </div>
+            </div>
           )}
 
           {hostPopup && ((hostPopup === "room" && isHost) || (hostPopup === "media" && (isHost || roomState.allowViewerQueueAdd)) || (hostPopup === "subtitle" && canOpenSubtitlePopup) || (hostPopup === "audio" && canOpenAudioPopup)) && (
@@ -3147,7 +3544,7 @@ const App: React.FC = () => {
               const isCurrentHost = userId === roomState.hostUserId;
               const isPendingRequester = userId === pendingClaimUserId;
               const isManualTransferCandidate = isHost && hostTransferCandidateUserId === userId;
-              const isSelfSyncingAvatar = userId === me && selfSyncingPlayback;
+              const isSelfSyncingAvatar = userId === me && (selfSyncingPlayback || mediaLoading);
               return (
                 <div
                   key={`${userId}-bottom`}
@@ -4735,6 +5132,49 @@ const styles: Record<string, React.CSSProperties> = {
     height: "100%",
     border: 0,
     display: "block"
+  },
+  processingOverlay: {
+    position: "absolute",
+    inset: 0,
+    display: "grid",
+    placeItems: "center",
+    pointerEvents: "none",
+    zIndex: 9
+  },
+  processingCard: {
+    width: "min(460px, 88%)",
+    borderRadius: "14px",
+    border: "1px solid rgba(175,201,255,0.34)",
+    background: "linear-gradient(160deg, rgba(11,22,49,0.84), rgba(11,22,49,0.64))",
+    boxShadow: "0 18px 40px rgba(0,0,0,0.44)",
+    padding: "12px 14px",
+    display: "grid",
+    gap: "8px",
+    backdropFilter: "blur(8px)",
+    WebkitBackdropFilter: "blur(8px)"
+  },
+  processingTitle: {
+    fontSize: "0.88rem",
+    fontWeight: 700,
+    color: "#e9f1ff"
+  },
+  processingBarBg: {
+    width: "100%",
+    height: "7px",
+    borderRadius: "999px",
+    background: "rgba(162,192,255,0.2)",
+    overflow: "hidden"
+  },
+  processingBarFill: {
+    height: "100%",
+    borderRadius: "999px",
+    background: "linear-gradient(90deg, #5ad8ff, #78a7ff 55%, #a78bfa)",
+    transition: "width 180ms ease"
+  },
+  processingMeta: {
+    fontSize: "0.78rem",
+    opacity: 0.9,
+    color: "#d7e4ff"
   },
   syncOverlay: {
     position: "absolute",

@@ -106,6 +106,9 @@ async function main() {
     }
 
     await runForeground("npm run test:player:api");
+    if ((process.env.CINELINK_RUN_REAL_LINKS || "").trim() === "1") {
+      await runForeground("npm run test:player:links");
+    }
 
     const client = spawnCommand("npm run client --workspace @cinelink/client -- --host 0.0.0.0 --port 5173", "client-test-player");
     procs.push(client);
