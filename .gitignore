@@ -36,3 +36,4 @@ temp/
 tmp_test_hls/
 tmp_test_hls2/
 temp_mkv_player/
+.tmp_subsearch/
